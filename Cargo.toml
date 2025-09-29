@@ -1,0 +1,20 @@
+[package]
+name = "firebee"
+version = "0.1.0"
+authors = ["Sai Aung Hlyan Htet <saiaunghlyanhtet2003@gmail.com>"]
+
+[build-dependencies]
+libbpf-cargo = "0.25.0"
+vmlinux = { git = "https://github.com/libbpf/vmlinux.h.git", rev = "83a228cf37fc65f2d14e4896a04922b5ee531a94" }
+
+[dependencies]
+libbpf-rs = "0.25.0"
+ratatui = "0.29.0"
+crossterm = "0.26.0"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+
