@@ -51,7 +51,7 @@ int xdp_firewall(struct xdp_md *ctx) {
 	event->src_ip = iph->saddr;
 	if (action && *action == 0) {
 		event->action = 0;
-		bpf_ringbf_submit(event, 0);
+		bpf_ringbuf_submit(event, 0);
 		return XDP_DROP;
 	}
 	
