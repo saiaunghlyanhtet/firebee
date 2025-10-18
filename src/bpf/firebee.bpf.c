@@ -1,8 +1,10 @@
 #include <linux/bpf.h>
 #include <linux/in.h>
 #include <linux/ip.h>
+#include <linux/if_ether.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
+
 
 // Key structure for the rules map
 struct rule_key {
@@ -27,14 +29,14 @@ struct {
 struct log_event {
 	__u32 src_ip;
 	__u32 action; // 1 = allow, 0 = deny
-}
+};
 
 SEC("xdp")
 int xdp_firewall(struct xdp_md *ctx) {
 	void *data = (void *)(long)ctx->data;
 	void *data_end = (void *)(long)ctx->data_end;
 	
-	struct iphdr *iph = data + sieof(struct ethhdr);
+	struct iphdr *iph = data + sizeof(struct ethhdr);
 	if ((void *)iph + sizeof(*iph) > data_end) {
 		return XDP_PASS;
 	}
