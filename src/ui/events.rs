@@ -1,15 +1,16 @@
 use crossterm::event::{Event, KeyCode};
-use crate::ui::app::{App, Command};
+use crate::ui::app::{App};
 use crate::models::rule::Action;
 
-pub fn handle_event(app: &mut App) -> anyhow::Result<bool> {
+pub async fn handle_events(app: &mut App) -> anyhow::Result<bool> {
     if crossterm::event::poll(std::time::Duration::from_millis(50))? {
         if let Event::Key(key_event) = crossterm::event::read()? {
             if app.input_mode {
                 match key_event.code {
                     KeyCode::Enter => {
                         let action = Action::Drop;
-                        app.add_rule(&app.input, action).await?;
+                        let input_copy = app.input.clone();
+                        let _ = app.add_rule(&input_copy, action).await;
                         app.input.clear();
                         app.input_mode = false;
                     }
@@ -36,6 +37,6 @@ pub fn handle_event(app: &mut App) -> anyhow::Result<bool> {
             }
         }
     }
-    app.update().await?;
+    app.update().await;
     Ok(false)
 }
