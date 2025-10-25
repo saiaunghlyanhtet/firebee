@@ -17,12 +17,14 @@ struct {
 	__type(key, struct rule_key);
 	__type(value, __u8); // 1 = allow, 0 = deny
 	__uint(max_entries, 1024);
+	__uint(pinning, LIBBPF_PIN_BY_NAME); 
 } rules_map SEC(".maps");
 
 // Map for logging (ring buffer)
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
 	__uint(max_entries, 1 << 24); // 16MB
+	__uint(pinning, LIBBPF_PIN_BY_NAME); 
 } log_events SEC(".maps");
 
 // Log event structure

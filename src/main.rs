@@ -17,16 +17,13 @@ mod ui;
 async fn main() -> Result<()> {
     env_logger::init();
 
-    // Initialize eBPF
     let (tx_cmd, rx_cmd) = mpsc::channel(32); // Commands: UI -> BPF
     let (tx_log, rx_log) = mpsc::channel(32); // Logs: BPF -> UI
-    let bpf_loader = BpfLoader::new("lo")?; // Use loopback for testing
+    let bpf_loader = BpfLoader::new("wlp2s0")?; // Use the active wireless interface
     
-    // Start a thread to run the BPF handler (not using async for BPF operations)
     let tx_log_clone = tx_log.clone();
     std::thread::spawn(move || {
         let mut bpf_handler = BpfHandler::new(bpf_loader, rx_cmd, tx_log_clone);
-        // Use a blocking runtime for the BPF handler
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -36,21 +33,18 @@ async fn main() -> Result<()> {
         });
     });
 
-    // Initialize TUI
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Initialize app state
     let mut app = App::new(tx_cmd, rx_log);
 
-    // Main loop
     loop {
         terminal.draw(|f| render_ui::<CrosstermBackend<io::Stdout>>(f, &mut app))?;
         if handle_events(&mut app).await? {
-            break; // Quit signal
+            break; 
         }
     }
 
