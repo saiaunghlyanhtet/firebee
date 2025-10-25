@@ -1,27 +1,27 @@
 use crate::ui::app::Command;
 use crate::bpf_user::{loader::BpfLoader, maps::BpfMaps};
 use tokio::sync::mpsc;
-use libbpf_rs::RingBufferBuilder;
+use libbpf_rs::{RingBufferBuilder, Link};
 use std::net::Ipv4Addr;
 
 pub struct BpfHandler {
-    bpf_object: Box<libbpf_rs::Object>,  // Store the object directly
+    bpf_object: Box<libbpf_rs::Object>,  
     maps: BpfMaps<'static>,
     cmd_rx: mpsc::Receiver<Command>,
     log_tx: mpsc::Sender<String>,
+    links: Vec<Link>, 
 }
 
 impl BpfHandler {
     pub fn new(loader: BpfLoader, cmd_rx: mpsc::Receiver<Command>, log_tx: mpsc::Sender<String>) -> Self {
-        // Box the object so we can get a 'static reference to it
         let bpf_object = Box::new(loader.bpf_object);
         
-        // Create maps using a leaked static reference
-        // This is safe because we keep the actual object alive in the struct
         let obj_ref = Box::leak(Box::new(&*bpf_object));
         let maps = unsafe { std::mem::transmute::<BpfMaps<'_>, BpfMaps<'static>>(BpfMaps::new(*obj_ref)) };
         
-        BpfHandler { bpf_object, maps, cmd_rx, log_tx }
+        let links = loader.links;
+        
+        BpfHandler { bpf_object, maps, cmd_rx, log_tx, links }
     }
 
     pub async fn run(&mut self) {
