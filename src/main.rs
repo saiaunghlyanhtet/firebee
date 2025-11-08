@@ -21,6 +21,12 @@ async fn main() -> Result<()> {
     let (tx_log, rx_log) = mpsc::channel(32); // Logs: BPF -> UI
     let bpf_loader = BpfLoader::new("wlp2s0")?; // Use the active wireless interface
     
+    // Load existing rules from eBPF map before moving loader
+    let existing_rules = bpf_loader.get_all_rules().unwrap_or_else(|e| {
+        log::warn!("Failed to load existing rules: {}", e);
+        Vec::new()
+    });
+    
     let tx_log_clone = tx_log.clone();
     std::thread::spawn(move || {
         let mut bpf_handler = BpfHandler::new(bpf_loader, rx_cmd, tx_log_clone);
@@ -39,7 +45,7 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(tx_cmd, rx_log);
+    let mut app = App::new(tx_cmd, rx_log, existing_rules);
 
     loop {
         terminal.draw(|f| render_ui::<CrosstermBackend<io::Stdout>>(f, &mut app))?;

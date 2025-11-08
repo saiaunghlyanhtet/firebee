@@ -17,9 +17,9 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cmd_tx: mpsc::Sender<Command>, log_rx: mpsc::Receiver<String>) -> Self {
+    pub fn new(cmd_tx: mpsc::Sender<Command>, log_rx: mpsc::Receiver<String>, initial_rules: Vec<Rule>) -> Self {
         Self {
-            rules: vec![],
+            rules: initial_rules,
             logs: vec![],
             input: String::new(),
             input_mode: false,

@@ -1,5 +1,6 @@
 use crate::ui::app::Command;
 use crate::bpf_user::{loader::BpfLoader, maps::BpfMaps};
+use crate::models::rule::Rule;
 use tokio::sync::mpsc;
 use libbpf_rs::{RingBufferBuilder, Link};
 use std::net::Ipv4Addr;
@@ -22,6 +23,10 @@ impl BpfHandler {
         let links = loader.links;
         
         BpfHandler { bpf_object, maps, cmd_rx, log_tx, links }
+    }
+
+    pub fn get_all_rules(&self) -> Result<Vec<Rule>, libbpf_rs::Error> {
+        self.maps.get_all_rules()
     }
 
     pub async fn run(&mut self) {
