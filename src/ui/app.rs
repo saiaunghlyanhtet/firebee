@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 pub enum Command {
     AddRule(Rule),
     RemoveRule(Ipv4Addr),
+    Unload,
 }
 
 pub struct App {
@@ -12,6 +13,8 @@ pub struct App {
     pub logs: Vec<String>,
     pub input: String,
     pub input_mode: bool,
+    pub confirm_unload: bool,
+    pub unload_requested: bool,
     cmd_tx: mpsc::Sender<Command>,
     log_rx: mpsc::Receiver<String>,
 }
@@ -23,6 +26,8 @@ impl App {
             logs: vec![],
             input: String::new(),
             input_mode: false,
+            confirm_unload: false,
+            unload_requested: false,
             cmd_tx,
             log_rx,
         }
@@ -53,5 +58,15 @@ impl App {
     pub async fn remove_rule(&mut self, ip: Ipv4Addr) -> bool {
         self.rules.retain(|r| r.ip != ip);
         self.cmd_tx.send(Command::RemoveRule(ip)).await.is_ok()
+    }
+
+    pub async fn unload(&mut self) -> bool {
+        match self.cmd_tx.send(Command::Unload).await {
+            Ok(_) => {
+                self.unload_requested = true;
+                true
+            }
+            Err(_) => false,
+        }
     }
 }

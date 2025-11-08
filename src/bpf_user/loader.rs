@@ -7,7 +7,8 @@ use std::net::Ipv4Addr;
 
 pub struct BpfLoader {
     pub bpf_object: libbpf_rs::Object,
-    pub links: Vec<Link>, 
+    pub links: Vec<Link>,
+    pub interface: String,
 }
 
 const BPF_FS: &str = "/sys/fs/bpf";
@@ -92,6 +93,7 @@ impl BpfLoader {
         Ok(BpfLoader { 
             bpf_object: obj,
             links,
+            interface: iface.to_string(),
         })
     }
     
@@ -127,6 +129,63 @@ impl BpfLoader {
         
         log::info!("Loaded {} existing rules from eBPF map", rules.len());
         Ok(rules)
+    }
+    
+    pub fn unload(iface: &str) -> Result<()> {
+        log::info!("Unloading BPF program and unpinning maps");
+        
+        // Note: XDP program should already be detached by dropping the Link objects
+        // We'll try to detach again just to be safe, in case it wasn't
+        log::info!("Ensuring XDP program is detached from interface {}", iface);
+        let detach_status = std::process::Command::new("ip")
+            .args(["link", "set", "dev", iface, "xdp", "off"])
+            .status();
+            
+        match detach_status {
+            Ok(status) if status.success() => {
+                log::info!("Successfully detached XDP program from {}", iface);
+            }
+            Ok(_) => {
+                log::debug!("XDP program already detached from {}", iface);
+            }
+            Err(e) => {
+                log::warn!("Error running ip command: {}", e);
+            }
+        }
+        
+        // Give kernel a moment to clean up
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        if Path::new(FIREBEE_DIR).exists() {
+            if let Err(e) = fs::read_dir(FIREBEE_DIR).map(|entries| {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        log::info!("Removing pinned object: {}", name);
+                    }
+
+                    let remove_result = if path.is_dir() {
+                        fs::remove_dir_all(&path)
+                    } else {
+                        fs::remove_file(&path)
+                    };
+
+                    if let Err(err) = remove_result {
+                        log::warn!("Failed to remove pinned object {:?}: {}", path, err);
+                    }
+                }
+            }) {
+                log::warn!("Failed to iterate pinned directory {}: {}", FIREBEE_DIR, e);
+            }
+
+            match fs::remove_dir(FIREBEE_DIR) {
+                Ok(_) => log::info!("Removed BPF directory: {}", FIREBEE_DIR),
+                Err(e) => log::warn!("Failed to remove BPF directory: {}", e),
+            }
+        }
+        
+        log::info!("BPF program and maps unloaded successfully");
+        Ok(())
     }
     
     // Get network interface index
