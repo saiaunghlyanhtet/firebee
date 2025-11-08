@@ -2,6 +2,8 @@ use anyhow::Result;
 use libbpf_rs::{ObjectBuilder, Link, MapCore};
 use std::fs;
 use std::path::Path;
+use crate::models::rule::{Action, Rule};
+use std::net::Ipv4Addr;
 
 pub struct BpfLoader {
     pub bpf_object: libbpf_rs::Object,
@@ -91,6 +93,40 @@ impl BpfLoader {
             bpf_object: obj,
             links,
         })
+    }
+    
+    pub fn get_all_rules(&self) -> Result<Vec<Rule>> {
+        let mut rules = Vec::new();
+        
+        // Get the rules map
+        let rules_map = self.bpf_object.maps().find(|m| {
+            m.name().to_string_lossy() == "rules_map"
+        }).ok_or_else(|| anyhow::anyhow!("rules_map not found"))?;
+        
+        // Iterate through all entries in the map
+        for key in rules_map.keys() {
+            if let Some(value) = rules_map.lookup(&key, libbpf_rs::MapFlags::ANY)? {
+                // Convert key (4 bytes) to IP address
+                if key.len() >= 4 {
+                    let ip_u32 = u32::from_ne_bytes([key[0], key[1], key[2], key[3]]);
+                    let ip = Ipv4Addr::from(u32::from_be_bytes(ip_u32.to_be_bytes()));
+                    
+                    // Convert value (1 byte) to action
+                    if !value.is_empty() {
+                        let action = if value[0] == 0 {
+                            Action::Drop
+                        } else {
+                            Action::Allow
+                        };
+                        
+                        rules.push(Rule { ip, action });
+                    }
+                }
+            }
+        }
+        
+        log::info!("Loaded {} existing rules from eBPF map", rules.len());
+        Ok(rules)
     }
     
     // Get network interface index
