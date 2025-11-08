@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
     });
     
     let tx_log_clone = tx_log.clone();
-    std::thread::spawn(move || {
+    let handler_handle = std::thread::spawn(move || {
         let mut bpf_handler = BpfHandler::new(bpf_loader, rx_cmd, tx_log_clone);
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -57,5 +57,13 @@ async fn main() -> Result<()> {
     // Cleanup
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+
+    if app.unload_requested {
+        if let Err(e) = handler_handle.join() {
+            log::error!("BPF handler thread panicked during unload: {:?}", e);
+        }
+    } else {
+        drop(handler_handle);
+    }
     Ok(())
 }
