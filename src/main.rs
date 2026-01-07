@@ -1,4 +1,5 @@
 use anyhow::Result;
+use clap::Parser;
 use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -13,13 +14,23 @@ mod bpf_user;
 mod models;
 mod ui;
 
+#[derive(Parser)]
+#[command(name = "firebee")]
+#[command(about = "eBPF-based XDP firewall with TUI", long_about = None)]
+struct Cli {
+    /// Network interface to attach the XDP program to
+    interface: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
 
+    let cli = Cli::parse();
+
     let (tx_cmd, rx_cmd) = mpsc::channel(32); // Commands: UI -> BPF
     let (tx_log, rx_log) = mpsc::channel(32); // Logs: BPF -> UI
-    let bpf_loader = BpfLoader::new("wlp2s0")?; // Use the active wireless interface
+    let bpf_loader = BpfLoader::new(&cli.interface)?;
     
     // Load existing rules from eBPF map before moving loader
     let existing_rules = bpf_loader.get_all_rules().unwrap_or_else(|e| {
