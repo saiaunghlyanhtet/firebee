@@ -1,5 +1,5 @@
-use anyhow::Result;
-use clap::{Parser, Subcommand};
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand, ValueEnum};
 use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -11,10 +11,12 @@ use tokio::sync::mpsc;
 use crate::bpf_user::{handler::BpfHandler, loader::BpfLoader, maps::BpfMaps};
 use crate::ui::{app::App, events::handle_events, widgets::render_ui};
 use crate::policy::{parse_policy_file, validate_policy};
+use crate::state::RulesState;
 
 mod bpf_user;
 mod models;
 mod policy;
+mod state;
 mod ui;
 
 #[derive(Parser)]
@@ -23,6 +25,12 @@ mod ui;
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Clone, ValueEnum)]
+enum OutputFormat {
+    Yaml,
+    Json,
 }
 
 #[derive(Subcommand)]
@@ -46,6 +54,38 @@ enum Commands {
         #[arg(short, long)]
         attach: bool,
     },
+    /// Get rule information
+    Get {
+        #[command(subcommand)]
+        command: GetCommands,
+    },
+    /// Delete rule
+    Delete {
+        #[command(subcommand)]
+        command: DeleteCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum GetCommands {
+    /// Get rule(s) - shows all rules if name not provided
+    Rule {
+        /// Name of the rule to retrieve (optional - shows all if omitted)
+        name: Option<String>,
+        
+        /// Output format
+        #[arg(short, long, value_enum, default_value = "yaml")]
+        output: OutputFormat,
+    },
+}
+
+#[derive(Subcommand)]
+enum DeleteCommands {
+    /// Delete a rule by name
+    Rule {
+        /// Name of the rule to delete
+        name: String,
+    },
 }
 
 #[tokio::main]
@@ -60,6 +100,20 @@ async fn main() -> Result<()> {
         }
         Commands::Add { interface, policy, attach } => {
             add_rules_from_policy(interface, policy, attach).await?;
+        }
+        Commands::Get { command } => {
+            match command {
+                GetCommands::Rule { name, output } => {
+                    get_rule(name.as_deref(), output)?;
+                }
+            }
+        }
+        Commands::Delete { command } => {
+            match command {
+                DeleteCommands::Rule { name } => {
+                    delete_rule(&name).await?;
+                }
+            }
         }
     }
 
@@ -131,14 +185,7 @@ async fn add_rules_from_policy(
     validate_policy(&policy)?;
     println!("Policy validation passed!");
     
-    // Convert policy rules to internal rules
-    let mut rules = Vec::new();
-    for policy_rule in &policy.rules {
-        let rule = policy_rule.to_rule()?;
-        rules.push((policy_rule.name.clone(), rule));
-    }
-    
-    println!("Found {} rules to add", rules.len());
+    println!("Found {} rules to add", policy.rules.len());
     
     // If attach flag is set, load the BPF program
     let _loader = if attach {
@@ -152,30 +199,104 @@ async fn add_rules_from_policy(
     };
     
     // Access the existing BPF maps
-    // We need to open the existing BPF object from the pinned maps
     let obj = libbpf_rs::ObjectBuilder::default()
         .open_file("target/bpf/firebee.bpf.o")?
         .load()?;
     
     let maps = BpfMaps::new(&obj);
     
-    // Add each rule to the BPF maps
-    for (name, rule) in &rules {
+    // Add each rule using the BPF metadata map
+    for policy_rule in &policy.rules {
+        RulesState::add_rule(&maps, policy_rule)?;
+        
+        let rule = policy_rule.to_rule()?;
         let action = match rule.action {
-            crate::models::rule::Action::Allow => 1,
-            crate::models::rule::Action::Drop => 0,
+            crate::models::rule::Action::Allow => "ALLOW",
+            crate::models::rule::Action::Drop => "DROP",
         };
         
-        maps.update_rule(rule.ip, action)?;
         println!("✓ Added rule '{}': {} -> {}", 
-            name, 
+            policy_rule.name, 
             rule.ip,
-            if action == 1 { "ALLOW" } else { "DROP" }
+            action
         );
     }
     
-    println!("\nSuccessfully added {} rules!", rules.len());
+    println!("\nSuccessfully added {} rules!", policy.rules.len());
     println!("Rules are now active in the eBPF firewall.");
+    
+    Ok(())
+}
+
+fn get_rule(name: Option<&str>, format: OutputFormat) -> Result<()> {
+    // Access BPF maps
+    let obj = libbpf_rs::ObjectBuilder::default()
+        .open_file("target/bpf/firebee.bpf.o")?
+        .load()?;
+    
+    let maps = BpfMaps::new(&obj);
+    
+    match name {
+        Some(rule_name) => {
+            // Get specific rule
+            let rule = RulesState::get_rule(&maps, rule_name)?
+                .ok_or_else(|| anyhow::anyhow!("Rule '{}' not found", rule_name))?;
+            
+            let output = match format {
+                OutputFormat::Yaml => {
+                    serde_yaml::to_string(&rule)
+                        .context("Failed to serialize rule to YAML")?
+                }
+                OutputFormat::Json => {
+                    serde_json::to_string_pretty(&rule)
+                        .context("Failed to serialize rule to JSON")?
+                }
+            };
+            
+            println!("{}", output);
+        }
+        None => {
+            // Get all rules
+            let rules = RulesState::list_rules(&maps)?;
+            
+            if rules.is_empty() {
+                println!("No rules found");
+                return Ok(());
+            }
+            
+            let output = match format {
+                OutputFormat::Yaml => {
+                    serde_yaml::to_string(&rules)
+                        .context("Failed to serialize rules to YAML")?
+                }
+                OutputFormat::Json => {
+                    serde_json::to_string_pretty(&rules)
+                        .context("Failed to serialize rules to JSON")?
+                }
+            };
+            
+            println!("{}", output);
+            println!("\nTotal rules: {}", rules.len());
+        }
+    }
+    
+    Ok(())
+}
+
+async fn delete_rule(name: &str) -> Result<()> {
+    // Access BPF maps
+    let obj = libbpf_rs::ObjectBuilder::default()
+        .open_file("target/bpf/firebee.bpf.o")?
+        .load()?;
+    
+    let maps = BpfMaps::new(&obj);
+    
+    // Delete from BPF maps (both rules and metadata)
+    let rule = RulesState::delete_rule(&maps, name)?
+        .ok_or_else(|| anyhow::anyhow!("Rule '{}' not found", name))?;
+    
+    println!("✓ Deleted rule '{}'  (IP: {})", name, rule.ip);
+    println!("Rule is now inactive in the eBPF firewall.");
     
     Ok(())
 }

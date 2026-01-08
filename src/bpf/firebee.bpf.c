@@ -11,6 +11,14 @@ struct rule_key {
     __u32 src_ip;
 };
 
+// Rule metadata structure
+struct rule_metadata {
+    __u32 ip;
+    __u8 action;
+    char name[64];
+    char description[128];
+};
+
 // Map to hold the firewall rules
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -19,6 +27,15 @@ struct {
 	__uint(max_entries, 1024);
 	__uint(pinning, LIBBPF_PIN_BY_NAME); 
 } rules_map SEC(".maps");
+
+// Map to hold rule metadata (indexed by rule name)
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, char[64]); // rule name
+	__type(value, struct rule_metadata);
+	__uint(max_entries, 1024);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+} rule_metadata_map SEC(".maps");
 
 // Map for logging (ring buffer)
 struct {

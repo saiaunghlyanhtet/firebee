@@ -1,0 +1,77 @@
+use anyhow::{Context, Result};
+use crate::bpf_user::maps::BpfMaps;
+use crate::policy::PolicyRule;
+
+/// RulesState now operates directly on BPF maps instead of files
+/// This provides a single source of truth and ensures consistency
+pub struct RulesState;
+
+impl RulesState {
+    /// Load all rules from BPF metadata map
+    pub fn load(maps: &BpfMaps) -> Result<Vec<PolicyRule>> {
+        maps.list_all_metadata()
+            .context("Failed to load rules from BPF metadata map")
+    }
+    
+    /// Add a rule to both BPF maps (rules + metadata)
+    pub fn add_rule(maps: &BpfMaps, rule: &PolicyRule) -> Result<()> {
+        let parsed_rule = rule.to_rule()
+            .context("Failed to convert policy rule")?;
+        
+        let action = match parsed_rule.action {
+            crate::models::rule::Action::Allow => 1,
+            crate::models::rule::Action::Drop => 0,
+        };
+        
+        // Update the firewall rule (IP -> action)
+        maps.update_rule(parsed_rule.ip, action as u32)
+            .context("Failed to update firewall rule")?;
+        
+        // Update the metadata (name -> full metadata)
+        maps.add_rule_metadata(
+            &rule.name,
+            parsed_rule.ip,
+            action,
+            rule.description.as_deref()
+        ).context("Failed to add rule metadata")?;
+        
+        Ok(())
+    }
+    
+    /// Get a specific rule by name from BPF metadata map
+    pub fn get_rule(maps: &BpfMaps, name: &str) -> Result<Option<PolicyRule>> {
+        let metadata = maps.get_rule_metadata(name)
+            .context("Failed to get rule metadata from BPF map")?;
+        
+        Ok(metadata.map(|m| m.to_policy_rule()))
+    }
+    
+    /// Delete a rule from both BPF maps
+    pub fn delete_rule(maps: &BpfMaps, name: &str) -> Result<Option<PolicyRule>> {
+        // First get the metadata to find the IP address
+        let metadata = maps.get_rule_metadata(name)
+            .context("Failed to get rule metadata")?;
+        
+        if let Some(meta) = metadata {
+            let policy_rule = meta.to_policy_rule();
+            let ip = meta.get_ip();
+            
+            // Delete from firewall rules map
+            maps.remove_rule(ip)
+                .context("Failed to remove firewall rule")?;
+            
+            // Delete from metadata map
+            maps.delete_rule_metadata(name)
+                .context("Failed to remove rule metadata")?;
+            
+            Ok(Some(policy_rule))
+        } else {
+            Ok(None)
+        }
+    }
+    
+    /// List all rules from BPF metadata map
+    pub fn list_rules(maps: &BpfMaps) -> Result<Vec<PolicyRule>> {
+        Self::load(maps)
+    }
+}
