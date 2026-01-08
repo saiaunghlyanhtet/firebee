@@ -46,7 +46,11 @@ impl App {
         if let Ok(ip_addr) = ip.parse::<Ipv4Addr>() {
             let rule = Rule {
                 ip: ip_addr,
+                subnet_mask: None,
                 action,
+                protocol: crate::models::rule::Protocol::Any,
+                src_port: None,
+                dst_port: None,
             };
             self.rules.push(rule.clone());
             self.cmd_tx.send(Command::AddRule(rule)).await.is_ok()

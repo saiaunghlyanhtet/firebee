@@ -7,6 +7,7 @@ use crossterm::{
 use ratatui::{prelude::*};
 use std::io;
 use std::path::PathBuf;
+use once_cell::sync::OnceCell;
 use tokio::sync::mpsc;
 use crate::bpf_user::{handler::BpfHandler, loader::BpfLoader, maps::BpfMaps};
 use crate::ui::{app::App, events::handle_events, widgets::render_ui};
@@ -18,6 +19,10 @@ mod models;
 mod policy;
 mod state;
 mod ui;
+
+// Global singleton for the BPF object used by CLI commands
+// This ensures we only create one instance and avoid memory leaks
+static PINNED_BPF_OBJ: OnceCell<libbpf_rs::Object> = OnceCell::new();
 
 #[derive(Parser)]
 #[command(name = "firebee")]
@@ -198,14 +203,16 @@ async fn add_rules_from_policy(
         None
     };
     
-    // Access the existing BPF maps
-    let obj = libbpf_rs::ObjectBuilder::default()
-        .open_file("target/bpf/firebee.bpf.o")?
-        .load()?;
+    // Access the BPF maps (either newly created or pinned)
+    let maps = if _loader.is_some() {
+        // If we just attached, the maps are newly created and pinned
+        // We need to open them from the pinned location
+        open_pinned_maps()?
+    } else {
+        // If not attaching, try to open existing pinned maps
+        open_pinned_maps()?
+    };
     
-    let maps = BpfMaps::new(&obj);
-    
-    // Add each rule using the BPF metadata map
     for policy_rule in &policy.rules {
         RulesState::add_rule(&maps, policy_rule)?;
         
@@ -225,20 +232,58 @@ async fn add_rules_from_policy(
     println!("\nSuccessfully added {} rules!", policy.rules.len());
     println!("Rules are now active in the eBPF firewall.");
     
+    // Keep the loader alive if we attached
+    // This prevents the XDP program from being detached
+    if _loader.is_some() {
+        println!("\nXDP program is attached and will remain active.");
+        println!("The program will stay loaded even after this command exits.");
+        std::mem::forget(_loader); // Intentionally leak to keep XDP attached
+    }
+    
     Ok(())
 }
 
-fn get_rule(name: Option<&str>, format: OutputFormat) -> Result<()> {
-    // Access BPF maps
-    let obj = libbpf_rs::ObjectBuilder::default()
-        .open_file("target/bpf/firebee.bpf.o")?
-        .load()?;
+fn open_pinned_maps() -> Result<BpfMaps<'static>> {
+    use std::path::Path;
     
-    let maps = BpfMaps::new(&obj);
+    // Check if maps are pinned
+    const FIREBEE_DIR: &str = "/sys/fs/bpf/firebee";
+    if !Path::new(&format!("{}/rules_map", FIREBEE_DIR)).exists() {
+        anyhow::bail!("No active firebee instance found. Maps are not pinned at {}. Run 'firebee run <interface>' or add rules with --attach flag first.", FIREBEE_DIR);
+    }
+    
+    // Get or initialize the singleton BPF object
+    let obj = PINNED_BPF_OBJ.get_or_try_init(|| -> Result<libbpf_rs::Object> {
+        // Open BPF object and reuse pinned maps
+        let mut builder = libbpf_rs::ObjectBuilder::default();
+        let mut open_obj = builder.open_file("target/bpf/firebee.bpf.o")
+            .context("Failed to open BPF object file")?;
+        
+        // Set all maps to reuse pinned paths instead of creating new ones
+        for mut map in open_obj.maps_mut() {
+            let map_name = map.name().to_string_lossy().to_string();
+            let pin_path = format!("{}/{}", FIREBEE_DIR, map_name);
+            if Path::new(&pin_path).exists() {
+                map.reuse_pinned_map(&pin_path)
+                    .with_context(|| format!("Failed to reuse pinned map {}", map_name))?;
+            }
+        }
+        
+        open_obj.load()
+            .context("Failed to load BPF object")
+    })?;
+    
+    let maps = BpfMaps::new(obj);
+    
+    Ok(maps)
+}
+
+fn get_rule(name: Option<&str>, format: OutputFormat) -> Result<()> {
+    // Access pinned BPF maps
+    let maps = open_pinned_maps()?;
     
     match name {
         Some(rule_name) => {
-            // Get specific rule
             let rule = RulesState::get_rule(&maps, rule_name)?
                 .ok_or_else(|| anyhow::anyhow!("Rule '{}' not found", rule_name))?;
             
@@ -284,12 +329,8 @@ fn get_rule(name: Option<&str>, format: OutputFormat) -> Result<()> {
 }
 
 async fn delete_rule(name: &str) -> Result<()> {
-    // Access BPF maps
-    let obj = libbpf_rs::ObjectBuilder::default()
-        .open_file("target/bpf/firebee.bpf.o")?
-        .load()?;
-    
-    let maps = BpfMaps::new(&obj);
+    // Access pinned BPF maps
+    let maps = open_pinned_maps()?;
     
     // Delete from BPF maps (both rules and metadata)
     let rule = RulesState::delete_rule(&maps, name)?

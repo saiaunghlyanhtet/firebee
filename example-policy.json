@@ -4,19 +4,31 @@
       "name": "block_suspicious_ip",
       "ip": "192.168.1.100",
       "action": "drop",
+      "protocol": "any",
       "description": "Block known malicious IP address"
     },
     {
       "name": "allow_trusted_server",
       "ip": "10.0.0.5",
       "action": "allow",
+      "protocol": "any",
       "description": "Allow traffic from trusted internal server"
     },
     {
-      "name": "block_scanner",
-      "ip": "203.0.113.42",
+      "name": "block_ssh_from_subnet",
+      "ip": "192.168.100.0/24",
       "action": "drop",
-      "description": "Block port scanner"
+      "protocol": "tcp",
+      "dst_port": 22,
+      "description": "Block SSH access from entire subnet"
+    },
+    {
+      "name": "allow_dns_queries",
+      "ip": "8.8.8.8",
+      "action": "allow",
+      "protocol": "udp",
+      "dst_port": 53,
+      "description": "Allow DNS queries to Google DNS"
     }
   ]
 }
