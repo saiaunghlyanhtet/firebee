@@ -9,7 +9,7 @@ use std::io;
 use std::path::PathBuf;
 use once_cell::sync::OnceCell;
 use tokio::sync::mpsc;
-use crate::bpf_user::{handler::BpfHandler, loader::BpfLoader, maps::BpfMaps};
+use crate::bpf_user::{loader::BpfLoader, maps::BpfMaps};
 use crate::ui::{app::App, events::handle_events, widgets::render_ui};
 use crate::policy::{parse_policy_file, validate_policy};
 use crate::state::RulesState;
@@ -40,11 +40,17 @@ enum OutputFormat {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run the firewall with interactive TUI
+    /// Attach and load the XDP firewall program
     Run {
         /// Network interface to attach the XDP program to
         interface: String,
+        
+        /// Optional policy file to load rules from
+        #[arg(short, long)]
+        policy: Option<PathBuf>,
     },
+    /// Show the firewall TUI (interactive interface)
+    Ui,
     /// Add rules from a policy file
     Add {
         /// Network interface (must already have firebee running or use with --attach)
@@ -100,8 +106,11 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { interface } => {
-            run_tui(&interface).await?;
+        Commands::Run { interface, policy } => {
+            run_firewall(&interface, policy).await?;
+        }
+        Commands::Ui => {
+            run_tui().await?;
         }
         Commands::Add { interface, policy, attach } => {
             add_rules_from_policy(interface, policy, attach).await?;
@@ -125,27 +134,104 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_tui(interface: &str) -> Result<()> {
-    let (tx_cmd, rx_cmd) = mpsc::channel(32); // Commands: UI -> BPF
-    let (tx_log, rx_log) = mpsc::channel(32); // Logs: BPF -> UI
-    let bpf_loader = BpfLoader::new(interface)?;
+async fn run_firewall(interface: &str, policy: Option<PathBuf>) -> Result<()> {
+    println!("Attaching XDP firewall to interface: {}", interface);
+    let _loader = BpfLoader::new(interface)?;
+    println!("✓ XDP program attached to {}", interface);
     
-    // Load existing rules from eBPF map before moving loader
-    let existing_rules = bpf_loader.get_all_rules().unwrap_or_else(|e| {
+    // Load rules from policy file if provided
+    if let Some(policy_path) = policy {
+        println!("\nLoading rules from policy file: {}", policy_path.display());
+        
+        let policy = parse_policy_file(&policy_path)?;
+        validate_policy(&policy)?;
+        println!("Policy validation passed!");
+        
+        let maps = open_pinned_maps()?;
+        
+        for policy_rule in &policy.rules {
+            RulesState::add_rule(&maps, policy_rule)?;
+            
+            let rule = policy_rule.to_rule()?;
+            let action = match rule.action {
+                crate::models::rule::Action::Allow => "ALLOW",
+                crate::models::rule::Action::Drop => "DROP",
+            };
+            
+            println!("✓ Added rule '{}': {} -> {}", 
+                policy_rule.name, 
+                rule.ip,
+                action
+            );
+        }
+        
+        println!("\nSuccessfully loaded {} rules!", policy.rules.len());
+    }
+    
+    println!("\nXDP firewall is running. Use 'firebee ui' to view the TUI.");
+    println!("The program will stay attached. Run 'firebee add' to add more rules.");
+    
+    // Keep the loader alive to prevent XDP detachment
+    std::mem::forget(_loader);
+    
+    Ok(())
+}
+
+async fn run_tui() -> Result<()> {
+    let (tx_cmd, _rx_cmd) = mpsc::channel(32); // Commands: UI -> BPF
+    let (tx_log, rx_log) = mpsc::channel(32); // Logs: BPF -> UI
+    
+    // Load existing rules from BPF maps
+    let maps = open_pinned_maps()?;
+    let existing_rules = RulesState::list_rules(&maps).unwrap_or_else(|e| {
         log::warn!("Failed to load existing rules: {}", e);
         Vec::new()
     });
     
+    // Start event reader thread to consume ring buffer events
     let tx_log_clone = tx_log.clone();
-    let handler_handle = std::thread::spawn(move || {
-        let mut bpf_handler = BpfHandler::new(bpf_loader, rx_cmd, tx_log_clone);
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
-            bpf_handler.run().await;
-        });
+    let event_handle = std::thread::spawn(move || {
+        use libbpf_rs::RingBufferBuilder;
+        use std::net::Ipv4Addr;
+        
+        // Open maps inside the thread since they're not Send
+        let maps = match open_pinned_maps() {
+            Ok(m) => m,
+            Err(e) => {
+                log::error!("Failed to open maps in event thread: {}", e);
+                return;
+            }
+        };
+        
+        let mut rb_builder = RingBufferBuilder::new();
+        let log_tx = tx_log_clone;
+
+        rb_builder
+            .add(&maps.log_events, move |data| {
+                if data.len() >= 8 {
+                    let src_ip = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                    let action = data[4];
+                    let ip = Ipv4Addr::from(src_ip);
+                    let msg = format!(
+                        "Packet from {}: {}",
+                        ip,
+                        if action == 0 { "DROPPED" } else { "PASSED" }
+                    );
+
+                    let _ = log_tx.try_send(msg);
+                }
+                0
+            })
+            .expect("Failed to create ring buffer");
+
+        let rb = rb_builder.build().expect("Failed to build ring buffer");
+
+        loop {
+            if let Err(e) = rb.poll(std::time::Duration::from_millis(100)) {
+                log::error!("Ring buffer poll error: {}", e);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
     });
 
     enable_raw_mode()?;
@@ -166,14 +252,10 @@ async fn run_tui(interface: &str) -> Result<()> {
     // Cleanup
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    
+    // Stop the event reader thread
+    drop(event_handle);
 
-    if app.unload_requested {
-        if let Err(e) = handler_handle.join() {
-            log::error!("BPF handler thread panicked during unload: {:?}", e);
-        }
-    } else {
-        drop(handler_handle);
-    }
     Ok(())
 }
 
@@ -248,8 +330,15 @@ fn open_pinned_maps() -> Result<BpfMaps<'static>> {
     
     // Check if maps are pinned
     const FIREBEE_DIR: &str = "/sys/fs/bpf/firebee";
-    if !Path::new(&format!("{}/rules_map", FIREBEE_DIR)).exists() {
-        anyhow::bail!("No active firebee instance found. Maps are not pinned at {}. Run 'firebee run <interface>' or add rules with --attach flag first.", FIREBEE_DIR);
+    let rules_map_path = format!("{}/rules_map", FIREBEE_DIR);
+    
+    if !Path::new(&rules_map_path).exists() {
+        anyhow::bail!(
+            "No active firebee instance found. Maps are not pinned at {}.\n\
+            Run 'sudo firebee run <interface>' first, or add rules with --attach flag.\n\
+            Note: If firebee is running, make sure to use 'sudo' for this command too.",
+            FIREBEE_DIR
+        );
     }
     
     // Get or initialize the singleton BPF object
