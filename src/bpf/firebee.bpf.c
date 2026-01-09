@@ -1,155 +1,174 @@
+/*
+ * Firebee XDP Firewall - BPF Program
+ * 
+ * High-performance packet filtering using eBPF/XDP
+ * Supports CIDR notation, protocol filtering, and port matching
+ */
+
 #include <linux/bpf.h>
-#include <linux/types.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
-#include <linux/in.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
-#define IPPROTO_TCP 6
-#define IPPROTO_UDP 17
-#define IPPROTO_ICMP 1
-#define IPPROTO_ANY 255
-#define PORT_ANY 0
+#include "firebee_common.h"
+#include "firebee_helpers.h"
+
 #define ETH_P_IP 0x0800
+#define MAX_RULES 1024
 
-// Rule entry structure combining key and value
-struct rule_entry {
-    __u32 src_ip;
-    __u32 subnet_mask;  // For CIDR matching
-    __u8 protocol;      // IPPROTO_TCP, IPPROTO_UDP, IPPROTO_ICMP, or IPPROTO_ANY
-    __u8 action;        // 1 = allow, 0 = drop
-    __u16 src_port;     // Source port (0 = any)
-    __u16 dst_port;     // Destination port (0 = any)
-    __u8 valid;         // 1 = entry is valid, 0 = empty slot
-    __u8 _padding[3];   // Padding for alignment
-};
+/* ========================================================================
+ * BPF Maps - Data structures shared between kernel and userspace
+ * ======================================================================== */
 
-// Key structure for metadata map (kept for backward compatibility)
-struct rule_key {
-    __u32 src_ip;
-    __u32 subnet_mask;
-    __u8 protocol;
-    __u16 src_port;
-    __u16 dst_port;
-};
-
-// Rule metadata structure
-struct rule_metadata {
-    __u32 ip;
-    __u32 subnet_mask;
-    __u8 action;
-    __u8 protocol;
-    __u16 src_port;
-    __u16 dst_port;
-    char name[64];
-    char description[128];
-};
-
-// Array map to hold firewall rules for iteration and CIDR matching
+/*
+ * Primary rules storage - Array map for efficient iteration
+ * Allows linear scan for CIDR matching and wildcard rules
+ */
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, __u32);
 	__type(value, struct rule_entry);
-	__uint(max_entries, 1024);
+	__uint(max_entries, MAX_RULES);
 } rules_map SEC(".maps");
 
-// Hash map for backward compatibility and quick rule management
+/*
+ * Rule index - Hash map for quick lookups by userspace
+ * Maps rule key to array index for O(1) updates/deletes
+ */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, struct rule_key);
-	__type(value, __u32); // Index in rules_map array
-	__uint(max_entries, 1024);
+	__type(value, __u32);
+	__uint(max_entries, MAX_RULES);
 } rules_index SEC(".maps");
 
-// Map to hold rule metadata (indexed by rule name)
+/*
+ * Rule metadata - Hash map indexed by rule name
+ * Stores human-readable information (name, description)
+ */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, char[64]); // rule name
+	__type(key, char[64]);
 	__type(value, struct rule_metadata);
-	__uint(max_entries, 1024);
+	__uint(max_entries, MAX_RULES);
 } rule_metadata_map SEC(".maps");
 
-// Map for logging (ring buffer)
+/*
+ * Event logging - Ring buffer for userspace event consumption
+ * Used to send packet events to TUI for display
+ */
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
-	__uint(max_entries, 1 << 24); // 16MB
+	__uint(max_entries, 1 << 24); /* 16MB */
 } log_events SEC(".maps");
 
-// Log event structure
-struct log_event {
-	__u32 src_ip;
-	__u32 action; // 1 = allow, 0 = deny
-};
+/* ========================================================================
+ * Packet Parsing Helpers
+ * ======================================================================== */
 
-static __always_inline int ip_matches(__u32 packet_ip, __u32 rule_ip, __u32 subnet_mask) {
-    if (subnet_mask == 0xFFFFFFFF) {
-        // Exact match
-        return packet_ip == rule_ip;
-    } else if (subnet_mask == 0) {
-        // Match any IP
-        return 1;
-    } else {
-        // CIDR match
-        return (packet_ip & subnet_mask) == (rule_ip & subnet_mask);
-    }
-}
+/*
+ * Extract transport layer ports from packet
+ * Only applies to TCP and UDP protocols
+ */
+static __always_inline void extract_ports(
+	struct iphdr *iph,
+	void *data_end,
+	__u8 protocol,
+	__u16 *src_port,
+	__u16 *dst_port
+) {
+	*src_port = 0;
+	*dst_port = 0;
 
-static __always_inline int port_matches(__u16 packet_port, __u16 rule_port) {
-    return rule_port == PORT_ANY || packet_port == rule_port;
-}
-
-SEC("xdp")
-int xdp_firewall(struct xdp_md *ctx) {
-	void *data = (void *)(long)ctx->data;
-	void *data_end = (void *)(long)ctx->data_end;
-	
-	struct ethhdr *eth = data;
-	if ((void *)(eth + 1) > data_end) {
-		return XDP_PASS;
-	}
-
-	// Only process IP packets
-	if (eth->h_proto != bpf_htons(ETH_P_IP)) {
-		return XDP_PASS;
-	}
-	
-	struct iphdr *iph = (void *)(eth + 1);
-	if ((void *)(iph + 1) > data_end) {
-		return XDP_PASS;
-	}
-
-	__u8 protocol = iph->protocol;
-	__u16 src_port = 0;
-	__u16 dst_port = 0;
+	void *l4_hdr = (void *)iph + (iph->ihl * 4);
 
 	if (protocol == IPPROTO_TCP) {
-		struct tcphdr *tcph = (void *)iph + (iph->ihl * 4);
+		struct tcphdr *tcph = l4_hdr;
 		if ((void *)(tcph + 1) > data_end) {
-			return XDP_PASS;
+			return;
 		}
-		src_port = bpf_ntohs(tcph->source);
-		dst_port = bpf_ntohs(tcph->dest);
+		*src_port = bpf_ntohs(tcph->source);
+		*dst_port = bpf_ntohs(tcph->dest);
 	} else if (protocol == IPPROTO_UDP) {
-		struct udphdr *udph = (void *)iph + (iph->ihl * 4);
+		struct udphdr *udph = l4_hdr;
 		if ((void *)(udph + 1) > data_end) {
-			return XDP_PASS;
+			return;
 		}
-		src_port = bpf_ntohs(udph->source);
-		dst_port = bpf_ntohs(udph->dest);
+		*src_port = bpf_ntohs(udph->source);
+		*dst_port = bpf_ntohs(udph->dest);
+	}
+}
+
+/*
+ * Log packet event to ring buffer for userspace
+ */
+static __always_inline void log_packet(__u32 src_ip, __u8 action) {
+	struct log_event *event = bpf_ringbuf_reserve(&log_events, sizeof(*event), 0);
+	if (event) {
+		event->src_ip = src_ip;
+		event->action = action;
+		bpf_ringbuf_submit(event, 0);
+	}
+}
+
+/* ========================================================================
+ * Rule Matching Engine
+ * ======================================================================== */
+
+/*
+ * Check if packet matches a specific rule
+ * Returns 1 if all conditions match, 0 otherwise
+ */
+static __always_inline int rule_matches(
+	struct rule_entry *rule,
+	__u32 packet_ip,
+	__u8 protocol,
+	__u16 src_port,
+	__u16 dst_port
+) {
+	/* Check IP with CIDR support */
+	if (!ip_matches(packet_ip, rule->src_ip, rule->subnet_mask)) {
+		return 0;
 	}
 
-	__u32 packet_ip = bpf_ntohl(iph->saddr);
-	__u8 default_action = 1; // Default: allow
-	__u8 matched_action = default_action;
+	/* Check protocol */
+	if (!protocol_matches(protocol, rule->protocol)) {
+		return 0;
+	}
 
-	// Iterate through rules array to find a match
-	// This allows proper CIDR and wildcard matching
-	// Use bounded loop for BPF verifier compliance
+	/* Check ports (only for TCP/UDP) */
+	if (protocol == IPPROTO_TCP || protocol == IPPROTO_UDP) {
+		if (!port_matches(src_port, rule->src_port)) {
+			return 0;
+		}
+		if (!port_matches(dst_port, rule->dst_port)) {
+			return 0;
+		}
+	}
+
+	return 1;
+}
+
+/*
+ * Find matching rule for packet
+ * Returns action (ACTION_ALLOW or ACTION_DROP)
+ * First matching rule wins
+ */
+static __always_inline __u8 find_matching_rule(
+	__u32 packet_ip,
+	__u8 protocol,
+	__u16 src_port,
+	__u16 dst_port
+) {
+	__u8 action = ACTION_ALLOW; /* Default: allow */
 	__u32 i;
-	for (i = 0; i < 1024; i++) {
+
+	/* Bounded loop for BPF verifier compliance */
+	#pragma unroll
+	for (i = 0; i < MAX_RULES; i++) {
 		__u32 key = i;
 		struct rule_entry *rule = bpf_map_lookup_elem(&rules_map, &key);
 		
@@ -157,43 +176,56 @@ int xdp_firewall(struct xdp_md *ctx) {
 			continue;
 		}
 
-		// Check if IP matches (with CIDR support)
-		if (!ip_matches(packet_ip, rule->src_ip, rule->subnet_mask)) {
-			continue;
+		if (rule_matches(rule, packet_ip, protocol, src_port, dst_port)) {
+			action = rule->action;
+			break; /* First match wins */
 		}
-
-		// Check if protocol matches
-		if (rule->protocol != IPPROTO_ANY && rule->protocol != protocol) {
-			continue;
-		}
-
-		// Check if ports match (only for TCP/UDP)
-		if (protocol == IPPROTO_TCP || protocol == IPPROTO_UDP) {
-			if (!port_matches(src_port, rule->src_port)) {
-				continue;
-			}
-			if (!port_matches(dst_port, rule->dst_port)) {
-				continue;
-			}
-		}
-
-		// All conditions matched - apply this rule
-		matched_action = rule->action;
-		break; // First match wins
 	}
 
-	struct log_event *event = bpf_ringbuf_reserve(&log_events, sizeof(*event), 0);
-	if (event) {
-		event->src_ip = packet_ip;
-		event->action = matched_action;
-		bpf_ringbuf_submit(event, 0);
+	return action;
+}
+
+/* ========================================================================
+ * XDP Main Program
+ * ======================================================================== */
+
+SEC("xdp")
+int xdp_firewall(struct xdp_md *ctx) {
+	void *data = (void *)(long)ctx->data;
+	void *data_end = (void *)(long)ctx->data_end;
+	
+	/* Parse Ethernet header */
+	struct ethhdr *eth = data;
+	if ((void *)(eth + 1) > data_end) {
+		return XDP_PASS;
 	}
 
-	if (matched_action == 0) {
-		return XDP_DROP;
+	/* Only process IPv4 packets */
+	if (eth->h_proto != bpf_htons(ETH_P_IP)) {
+		return XDP_PASS;
 	}
 	
-	return XDP_PASS;
+	/* Parse IP header */
+	struct iphdr *iph = (void *)(eth + 1);
+	if ((void *)(iph + 1) > data_end) {
+		return XDP_PASS;
+	}
+
+	/* Extract packet information */
+	__u32 packet_ip = bpf_ntohl(iph->saddr);
+	__u8 protocol = iph->protocol;
+	__u16 src_port, dst_port;
+	
+	extract_ports(iph, data_end, protocol, &src_port, &dst_port);
+
+	/* Find matching firewall rule */
+	__u8 action = find_matching_rule(packet_ip, protocol, src_port, dst_port);
+
+	/* Log the event */
+	log_packet(packet_ip, action);
+
+	/* Apply action */
+	return (action == ACTION_DROP) ? XDP_DROP : XDP_PASS;
 }
 
 char _license[] SEC("license") = "GPL";
