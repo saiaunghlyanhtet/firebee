@@ -85,8 +85,15 @@ impl BpfLoader {
         }
         
         // Attach XDP program to interface
-        let link = prog.attach_xdp(Self::get_ifindex(iface)?)?;
+        let mut link = prog.attach_xdp(Self::get_ifindex(iface)?)?;
         log::info!("Attached XDP program to interface {}", iface);
+        
+        // Pin the link to keep XDP attached even after process exits
+        let link_pin_path = format!("{}/xdp_link", FIREBEE_DIR);
+        match link.pin(&link_pin_path) {
+            Ok(_) => log::info!("Pinned XDP link to {}", link_pin_path),
+            Err(e) => log::warn!("Could not pin link: {} (may already be pinned)", e),
+        }
         
         let links = vec![link];
         
@@ -100,20 +107,19 @@ impl BpfLoader {
     pub fn get_all_rules(&self) -> Result<Vec<Rule>> {
         let mut rules = Vec::new();
         
-        // Get the rules map
         let rules_map = self.bpf_object.maps().find(|m| {
             m.name().to_string_lossy() == "rules_map"
         }).ok_or_else(|| anyhow::anyhow!("rules_map not found"))?;
         
-        // Iterate through all entries in the map
         for key in rules_map.keys() {
             if let Some(value) = rules_map.lookup(&key, libbpf_rs::MapFlags::ANY)? {
-                // Convert key (4 bytes) to IP address
-                if key.len() >= 4 {
-                    let ip_u32 = u32::from_ne_bytes([key[0], key[1], key[2], key[3]]);
-                    let ip = Ipv4Addr::from(u32::from_be_bytes(ip_u32.to_be_bytes()));
+                if key.len() >= std::mem::size_of::<crate::bpf_user::maps::RuleKey>() {
+                    let rule_key = unsafe {
+                        std::ptr::read(key.as_ptr() as *const crate::bpf_user::maps::RuleKey)
+                    };
                     
-                    // Convert value (1 byte) to action
+                    let ip = Ipv4Addr::from(rule_key.src_ip);
+                    
                     if !value.is_empty() {
                         let action = if value[0] == 0 {
                             Action::Drop
@@ -121,7 +127,23 @@ impl BpfLoader {
                             Action::Allow
                         };
                         
-                        rules.push(Rule { ip, action });
+                        let protocol = crate::models::rule::Protocol::from_u8(rule_key.protocol);
+                        let subnet_mask = if rule_key.subnet_mask == 0xFFFFFFFF {
+                            None
+                        } else if rule_key.subnet_mask == 0 {
+                            Some(0)
+                        } else {
+                            Some(rule_key.subnet_mask.count_ones() as u8)
+                        };
+                        
+                        rules.push(Rule {
+                            ip,
+                            subnet_mask,
+                            action,
+                            protocol,
+                            src_port: if rule_key.src_port == 0 { None } else { Some(rule_key.src_port) },
+                            dst_port: if rule_key.dst_port == 0 { None } else { Some(rule_key.dst_port) },
+                        });
                     }
                 }
             }

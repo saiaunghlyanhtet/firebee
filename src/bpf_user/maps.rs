@@ -1,19 +1,55 @@
 use libbpf_rs::{Map, MapCore};
 use std::net::Ipv4Addr;
-use crate::models::rule::{Action, Rule};
+use crate::models::rule::{Action, Protocol, Rule};
 use crate::policy::PolicyRule;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RuleEntry {
+    pub src_ip: u32,
+    pub subnet_mask: u32,
+    pub protocol: u8,
+    pub action: u8,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub valid: u8,
+    pub _padding: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RuleKey {
+    pub src_ip: u32,
+    pub subnet_mask: u32,
+    pub protocol: u8,
+    pub src_port: u16,
+    pub dst_port: u16,
+}
 
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct RuleMetadata {
     pub ip: u32,
+    pub subnet_mask: u32,
     pub action: u8,
+    pub protocol: u8,
+    pub src_port: u16,
+    pub dst_port: u16,
     pub name: [u8; 64],
     pub description: [u8; 128],
 }
 
 impl RuleMetadata {
-    pub fn new(ip: Ipv4Addr, action: u8, name: &str, description: Option<&str>) -> Self {
+    pub fn new(
+        ip: Ipv4Addr, 
+        subnet_mask: u32,
+        action: u8, 
+        protocol: u8,
+        src_port: Option<u16>,
+        dst_port: Option<u16>,
+        name: &str, 
+        description: Option<&str>
+    ) -> Self {
         let mut name_bytes = [0u8; 64];
         let mut desc_bytes = [0u8; 128];
         
@@ -27,7 +63,11 @@ impl RuleMetadata {
         
         RuleMetadata {
             ip: u32::from_be_bytes(ip.octets()),
+            subnet_mask,
             action,
+            protocol,
+            src_port: src_port.unwrap_or(0),
+            dst_port: dst_port.unwrap_or(0),
             name: name_bytes,
             description: desc_bytes,
         }
@@ -51,12 +91,32 @@ impl RuleMetadata {
         Ipv4Addr::from(self.ip)
     }
     
+    pub fn get_cidr(&self) -> String {
+        let ip = self.get_ip();
+        if self.subnet_mask == 0xFFFFFFFF {
+            ip.to_string()
+        } else if self.subnet_mask == 0 {
+            format!("{}/0", ip)
+        } else {
+            let prefix_len = self.subnet_mask.count_ones();
+            format!("{}/{}", ip, prefix_len)
+        }
+    }
+    
     pub fn to_policy_rule(&self) -> PolicyRule {
         PolicyRule {
             name: self.get_name(),
-            ip: self.get_ip().to_string(),
+            ip: self.get_cidr(),
             action: if self.action == 0 { "drop".to_string() } else { "allow".to_string() },
             description: self.get_description(),
+            protocol: match self.protocol {
+                6 => "tcp".to_string(),
+                17 => "udp".to_string(),
+                1 => "icmp".to_string(),
+                _ => "any".to_string(),
+            },
+            src_port: if self.src_port == 0 { None } else { Some(self.src_port) },
+            dst_port: if self.dst_port == 0 { None } else { Some(self.dst_port) },
         }
     }
 }
@@ -90,56 +150,167 @@ impl<'a> BpfMaps<'a> {
         BpfMaps { rules, log_events, metadata }
     }
 
-    pub fn update_rule(&self, ip: Ipv4Addr, action: u32) -> Result<(), libbpf_rs::Error> {
-        log::info!("Updating rule for IP {} with action {}", ip, action);
+    pub fn update_rule(&self, rule: &Rule, action: u8) -> Result<(), libbpf_rs::Error> {
+        log::info!("Updating rule for IP {} with action {}", rule.ip, action);
         
-        let ip_bytes = ip.octets();
-        let ip_u32 = u32::from_be_bytes(ip_bytes);
+        let ip_u32 = u32::from_be_bytes(rule.ip.octets());
+        let subnet_mask = rule.get_subnet_mask_u32();
         
-        let key_bytes = ip_u32.to_ne_bytes();
-        let value_bytes = [action as u8];
+        // Create a rule entry for the array map
+        let entry = RuleEntry {
+            src_ip: ip_u32,
+            subnet_mask,
+            protocol: rule.protocol.to_u8(),
+            action,
+            src_port: rule.src_port.unwrap_or(0),
+            dst_port: rule.dst_port.unwrap_or(0),
+            valid: 1,
+            _padding: [0; 3],
+        };
         
-        self.rules.update(&key_bytes, &value_bytes, libbpf_rs::MapFlags::ANY)?;
+        let entry_bytes = unsafe {
+            std::slice::from_raw_parts(
+                &entry as *const RuleEntry as *const u8,
+                std::mem::size_of::<RuleEntry>()
+            )
+        };
+        
+        // Find first empty slot or update existing rule
+        let mut slot_index: Option<u32> = None;
+        
+        for i in 0..1024u32 {
+            let i_bytes = i.to_ne_bytes();
+            if let Some(value) = self.rules.lookup(&i_bytes, libbpf_rs::MapFlags::ANY)? {
+                if value.len() >= std::mem::size_of::<RuleEntry>() {
+                    let existing = unsafe {
+                        std::ptr::read(value.as_ptr() as *const RuleEntry)
+                    };
+                    
+                    // Check if this is the same rule (update case)
+                    if existing.valid == 1 && 
+                       existing.src_ip == ip_u32 &&
+                       existing.subnet_mask == subnet_mask &&
+                       existing.protocol == rule.protocol.to_u8() &&
+                       existing.src_port == rule.src_port.unwrap_or(0) &&
+                       existing.dst_port == rule.dst_port.unwrap_or(0) {
+                        slot_index = Some(i);
+                        break;
+                    }
+                    
+                    // Track first empty slot
+                    if existing.valid == 0 && slot_index.is_none() {
+                        slot_index = Some(i);
+                    }
+                }
+            } else {
+                // Empty slot found
+                if slot_index.is_none() {
+                    slot_index = Some(i);
+                }
+            }
+        }
+        
+        let index = slot_index.ok_or_else(|| {
+            libbpf_rs::Error::from(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Rules map is full (max 1024 rules)"
+            ))
+        })?;
+        
+        let index_bytes = index.to_ne_bytes();
+        self.rules.update(&index_bytes, entry_bytes, libbpf_rs::MapFlags::ANY)?;
             
-        log::info!("Rule updated successfully for IP {}", ip);
+        log::info!("Rule updated successfully for IP {} at index {}", rule.ip, index);
         Ok(())
     }
 
-    pub fn remove_rule(&self, ip: Ipv4Addr) -> Result<(), libbpf_rs::Error> {
-        log::info!("Removing rule for IP {}", ip);
+    pub fn remove_rule(&self, rule: &Rule) -> Result<(), libbpf_rs::Error> {
+        log::info!("Removing rule for IP {}", rule.ip);
         
-        let ip_bytes = ip.octets();
-        let ip_u32 = u32::from_be_bytes(ip_bytes);
+        let ip_u32 = u32::from_be_bytes(rule.ip.octets());
+        let subnet_mask = rule.get_subnet_mask_u32();
         
-        let key_bytes = ip_u32.to_ne_bytes();
+        // Find and invalidate the matching rule entry
+        for i in 0..1024u32 {
+            let i_bytes = i.to_ne_bytes();
+            if let Some(value) = self.rules.lookup(&i_bytes, libbpf_rs::MapFlags::ANY)? {
+                if value.len() >= std::mem::size_of::<RuleEntry>() {
+                    let existing = unsafe {
+                        std::ptr::read(value.as_ptr() as *const RuleEntry)
+                    };
+                    
+                    if existing.valid == 1 && 
+                       existing.src_ip == ip_u32 &&
+                       existing.subnet_mask == subnet_mask &&
+                       existing.protocol == rule.protocol.to_u8() &&
+                       existing.src_port == rule.src_port.unwrap_or(0) &&
+                       existing.dst_port == rule.dst_port.unwrap_or(0) {
+                        // Mark as invalid
+                        let mut entry = existing;
+                        entry.valid = 0;
+                        
+                        let entry_bytes = unsafe {
+                            std::slice::from_raw_parts(
+                                &entry as *const RuleEntry as *const u8,
+                                std::mem::size_of::<RuleEntry>()
+                            )
+                        };
+                        
+                        self.rules.update(&i_bytes, entry_bytes, libbpf_rs::MapFlags::ANY)?;
+                        log::info!("Rule removed successfully for IP {} from index {}", rule.ip, i);
+                        return Ok(());
+                    }
+                }
+            }
+        }
         
-        self.rules.delete(&key_bytes)?;
-            
-        log::info!("Rule removed successfully for IP {}", ip);
-        Ok(())
+        Err(libbpf_rs::Error::from(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("Rule not found for IP {}", rule.ip)
+        )))
     }
 
     pub fn get_all_rules(&self) -> Result<Vec<Rule>, libbpf_rs::Error> {
         let mut rules = Vec::new();
         
-        // Iterate through all entries in the map
-        for key in self.rules.keys() {
-            if let Some(value) = self.rules.lookup(&key, libbpf_rs::MapFlags::ANY)? {
-                // Convert key (4 bytes) to IP address
-                if key.len() >= 4 {
-                    let ip_u32 = u32::from_ne_bytes([key[0], key[1], key[2], key[3]]);
-                    let ip = Ipv4Addr::from(u32::from_be_bytes(ip_u32.to_be_bytes()));
+        // Iterate through array map entries
+        for i in 0..1024u32 {
+            let i_bytes = i.to_ne_bytes();
+            if let Some(value) = self.rules.lookup(&i_bytes, libbpf_rs::MapFlags::ANY)? {
+                if value.len() >= std::mem::size_of::<RuleEntry>() {
+                    let entry = unsafe {
+                        std::ptr::read(value.as_ptr() as *const RuleEntry)
+                    };
                     
-                    // Convert value (1 byte) to action
-                    if !value.is_empty() {
-                        let action = if value[0] == 0 {
-                            Action::Drop
-                        } else {
-                            Action::Allow
-                        };
-                        
-                        rules.push(Rule { ip, action });
+                    // Only include valid entries
+                    if entry.valid == 0 {
+                        continue;
                     }
+                    
+                    let ip = Ipv4Addr::from(entry.src_ip);
+                    let action = if entry.action == 0 {
+                        Action::Drop
+                    } else {
+                        Action::Allow
+                    };
+                    
+                    let protocol = Protocol::from_u8(entry.protocol);
+                    let subnet_mask = if entry.subnet_mask == 0xFFFFFFFF {
+                        None
+                    } else if entry.subnet_mask == 0 {
+                        Some(0)
+                    } else {
+                        Some(entry.subnet_mask.count_ones() as u8)
+                    };
+                    
+                    rules.push(Rule {
+                        ip,
+                        subnet_mask,
+                        action,
+                        protocol,
+                        src_port: if entry.src_port == 0 { None } else { Some(entry.src_port) },
+                        dst_port: if entry.dst_port == 0 { None } else { Some(entry.dst_port) },
+                    });
                 }
             }
         }
@@ -149,8 +320,18 @@ impl<'a> BpfMaps<'a> {
     }
     
     // Metadata map operations
-    pub fn add_rule_metadata(&self, name: &str, ip: Ipv4Addr, action: u8, description: Option<&str>) -> Result<(), libbpf_rs::Error> {
-        let metadata = RuleMetadata::new(ip, action, name, description);
+    pub fn add_rule_metadata(&self, name: &str, rule: &Rule, action: u8, description: Option<&str>) -> Result<(), libbpf_rs::Error> {
+        let subnet_mask = rule.get_subnet_mask_u32();
+        let metadata = RuleMetadata::new(
+            rule.ip,
+            subnet_mask,
+            action,
+            rule.protocol.to_u8(),
+            rule.src_port,
+            rule.dst_port,
+            name,
+            description,
+        );
         let metadata_bytes = unsafe {
             std::slice::from_raw_parts(
                 &metadata as *const RuleMetadata as *const u8,
@@ -162,7 +343,7 @@ impl<'a> BpfMaps<'a> {
         let name_len = name.len().min(63);
         key_bytes[..name_len].copy_from_slice(&name.as_bytes()[..name_len]);
         
-        self.metadata.update(&key_bytes, metadata_bytes, libbpf_rs::MapFlags::ANY)?;
+        self.metadata.update(&key_bytes[..], metadata_bytes, libbpf_rs::MapFlags::ANY)?;
         log::info!("Added metadata for rule '{}'", name);
         Ok(())
     }
@@ -172,7 +353,7 @@ impl<'a> BpfMaps<'a> {
         let name_len = name.len().min(63);
         key_bytes[..name_len].copy_from_slice(&name.as_bytes()[..name_len]);
         
-        if let Some(value) = self.metadata.lookup(&key_bytes, libbpf_rs::MapFlags::ANY)? {
+        if let Some(value) = self.metadata.lookup(&key_bytes[..], libbpf_rs::MapFlags::ANY)? {
             if value.len() >= std::mem::size_of::<RuleMetadata>() {
                 let metadata = unsafe {
                     std::ptr::read(value.as_ptr() as *const RuleMetadata)
@@ -188,7 +369,7 @@ impl<'a> BpfMaps<'a> {
         let name_len = name.len().min(63);
         key_bytes[..name_len].copy_from_slice(&name.as_bytes()[..name_len]);
         
-        self.metadata.delete(&key_bytes)?;
+        self.metadata.delete(&key_bytes[..])?;
         log::info!("Deleted metadata for rule '{}'", name);
         Ok(())
     }

@@ -23,17 +23,13 @@ impl RulesState {
             crate::models::rule::Action::Drop => 0,
         };
         
-        // Update the firewall rule (IP -> action)
-        maps.update_rule(parsed_rule.ip, action as u32)
+        // Update the firewall rule
+        maps.update_rule(&parsed_rule, action)
             .context("Failed to update firewall rule")?;
         
-        // Update the metadata (name -> full metadata)
-        maps.add_rule_metadata(
-            &rule.name,
-            parsed_rule.ip,
-            action,
-            rule.description.as_deref()
-        ).context("Failed to add rule metadata")?;
+        // Update the metadata
+        maps.add_rule_metadata(&rule.name, &parsed_rule, action, rule.description.as_deref())
+            .context("Failed to add rule metadata")?;
         
         Ok(())
     }
@@ -48,16 +44,17 @@ impl RulesState {
     
     /// Delete a rule from both BPF maps
     pub fn delete_rule(maps: &BpfMaps, name: &str) -> Result<Option<PolicyRule>> {
-        // First get the metadata to find the IP address
+        // First get the metadata to find the rule details
         let metadata = maps.get_rule_metadata(name)
             .context("Failed to get rule metadata")?;
         
         if let Some(meta) = metadata {
             let policy_rule = meta.to_policy_rule();
-            let ip = meta.get_ip();
+            let rule = policy_rule.to_rule()
+                .context("Failed to convert policy rule for deletion")?;
             
             // Delete from firewall rules map
-            maps.remove_rule(ip)
+            maps.remove_rule(&rule)
                 .context("Failed to remove firewall rule")?;
             
             // Delete from metadata map

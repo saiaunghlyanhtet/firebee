@@ -87,7 +87,7 @@ impl BpfHandler {
                             crate::models::rule::Action::Drop => 0,
                         };
                         if let Some(maps) = self.maps.as_ref() {
-                            if let Err(e) = maps.update_rule(rule.ip, action) {
+                            if let Err(e) = maps.update_rule(&rule, action) {
                                 log::error!("Failed to update rule: {}", e);
                             }
                         } else {
@@ -96,8 +96,41 @@ impl BpfHandler {
                     }
                     Command::RemoveRule(ip) => {
                         if let Some(maps) = self.maps.as_ref() {
-                            if let Err(e) = maps.remove_rule(ip) {
-                                log::error!("Failed to remove rule: {}", e);
+                            // Try to find the rule in metadata by searching for matching IP
+                            // This ensures we get the correct protocol, ports, and subnet mask
+                            let mut found = false;
+                            
+                            // Iterate through metadata to find matching IP
+                            match maps.list_all_metadata() {
+                                Ok(policy_rules) => {
+                                    for policy_rule in policy_rules {
+                                        // Parse the IP from CIDR format
+                                        if let Ok(rule) = policy_rule.to_rule() {
+                                            if rule.ip == ip {
+                                                // Found the rule with matching IP, now delete it
+                                                if let Err(e) = maps.remove_rule(&rule) {
+                                                    log::error!("Failed to remove rule from rules map: {}", e);
+                                                } else {
+                                                    // Also delete the metadata
+                                                    if let Err(e) = maps.delete_rule_metadata(&policy_rule.name) {
+                                                        log::error!("Failed to delete rule metadata: {}", e);
+                                                    } else {
+                                                        log::info!("Successfully removed rule '{}' for IP {}", policy_rule.name, ip);
+                                                        found = true;
+                                                    }
+                                                }
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    
+                                    if !found {
+                                        log::warn!("No rule found with IP {} in metadata", ip);
+                                    }
+                                }
+                                Err(e) => {
+                                    log::error!("Failed to list metadata for removal: {}", e);
+                                }
                             }
                         } else {
                             log::warn!("RemoveRule received after maps were released");
