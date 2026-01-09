@@ -12,21 +12,46 @@ pub fn render_ui<B: Backend>(f: &mut Frame, app: &mut App) {
         .split(f.area());
 
     let rules = app.rules.iter().map(|r| {
+        let action = match r.action.to_lowercase().as_str() {
+            "allow" => "Allow",
+            "drop" => "Drop",
+            _ => &r.action,
+        };
+        
+        let protocol = r.protocol.to_uppercase();
+        
+        let ports = match (&r.src_port, &r.dst_port) {
+            (Some(src), Some(dst)) => format!("{}:{}", src, dst),
+            (Some(src), None) => format!("{}:*", src),
+            (None, Some(dst)) => format!("*:{}", dst),
+            (None, None) => "*".to_string(),
+        };
+        
+        let description = r.description.as_deref().unwrap_or("-");
+        
         Row::new(vec![
-            r.ip.to_string(),
-            match r.action {
-                crate::models::rule::Action::Allow => "Allow".to_string(),
-                crate::models::rule::Action::Drop => "Drop".to_string(),
-            },
+            r.name.clone(),
+            r.ip.clone(),
+            protocol,
+            ports,
+            action.to_string(),
+            description.to_string(),
         ])
     });
 
     let rules_table = Table::new(
         rules,
-        [Constraint::Percentage(50), Constraint::Percentage(50)]
+        [
+            Constraint::Percentage(15),  // Name
+            Constraint::Percentage(20),  // IP/CIDR
+            Constraint::Percentage(10),  // Protocol
+            Constraint::Percentage(10),  // Ports
+            Constraint::Percentage(10),  // Action
+            Constraint::Percentage(35),  // Description
+        ]
     )
         .header(
-            Row::new(vec!["IP Address", "Action"])
+            Row::new(vec!["Name", "IP/CIDR", "Protocol", "Ports", "Action", "Description"])
                 .style(Style::default().add_modifier(Modifier::BOLD)),
         )
         .block(Block::default().borders(Borders::ALL).title("Rules"));
@@ -39,7 +64,7 @@ pub fn render_ui<B: Backend>(f: &mut Frame, app: &mut App) {
     f.render_widget(logs, chunks[1]);
 
     // Help bar at the bottom
-    let help_text = "Shortcuts: [A] Add Rule | [U] Unload Program | [Q] Quit";
+    let help_text = "Shortcuts: [Q] Quit | Use 'firebee add' command to add rules";
     let help = Paragraph::new(help_text)
         .style(Style::default().fg(Color::Gray))
         .alignment(ratatui::layout::Alignment::Center)

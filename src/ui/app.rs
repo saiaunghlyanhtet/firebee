@@ -1,4 +1,5 @@
 use crate::models::rule::{Action, Rule};
+use crate::policy::PolicyRule;
 use std::net::Ipv4Addr;
 use tokio::sync::mpsc;
 
@@ -9,7 +10,7 @@ pub enum Command {
 }
 
 pub struct App {
-    pub rules: Vec<Rule>,
+    pub rules: Vec<PolicyRule>,
     pub logs: Vec<String>,
     pub input: String,
     pub input_mode: bool,
@@ -20,7 +21,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cmd_tx: mpsc::Sender<Command>, log_rx: mpsc::Receiver<String>, initial_rules: Vec<Rule>) -> Self {
+    pub fn new(cmd_tx: mpsc::Sender<Command>, log_rx: mpsc::Receiver<String>, initial_rules: Vec<PolicyRule>) -> Self {
         Self {
             rules: initial_rules,
             logs: vec![],
@@ -47,12 +48,25 @@ impl App {
             let rule = Rule {
                 ip: ip_addr,
                 subnet_mask: None,
-                action,
+                action: action.clone(),
                 protocol: crate::models::rule::Protocol::Any,
                 src_port: None,
                 dst_port: None,
             };
-            self.rules.push(rule.clone());
+            // Create a PolicyRule for display
+            let policy_rule = PolicyRule {
+                name: format!("rule_{}", ip),
+                ip: ip.to_string(),
+                action: match action {
+                    Action::Allow => "allow".to_string(),
+                    Action::Drop => "drop".to_string(),
+                },
+                description: None,
+                protocol: "any".to_string(),
+                src_port: None,
+                dst_port: None,
+            };
+            self.rules.push(policy_rule);
             self.cmd_tx.send(Command::AddRule(rule)).await.is_ok()
         } else {
             false
@@ -60,7 +74,7 @@ impl App {
     }
 
     pub async fn remove_rule(&mut self, ip: Ipv4Addr) -> bool {
-        self.rules.retain(|r| r.ip != ip);
+        self.rules.retain(|r| r.ip != ip.to_string());
         self.cmd_tx.send(Command::RemoveRule(ip)).await.is_ok()
     }
 
