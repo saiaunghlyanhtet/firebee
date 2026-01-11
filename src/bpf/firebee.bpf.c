@@ -65,6 +65,17 @@ struct {
 	__uint(max_entries, 1 << 24); /* 16MB */
 } log_events SEC(".maps");
 
+/*
+ * Rule statistics - Array map for per-rule packet/byte counters
+ * Indexed by rule array index, parallel to rules_map
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, __u32);
+	__type(value, struct rule_stats);
+	__uint(max_entries, MAX_RULES);
+} rule_stats_map SEC(".maps");
+
 /* ========================================================================
  * Packet Parsing Helpers
  * ======================================================================== */
@@ -153,18 +164,21 @@ static __always_inline int rule_matches(
 }
 
 /*
- * Find matching rule for packet
+ * Find matching rule for packet and update statistics
  * Returns action (ACTION_ALLOW or ACTION_DROP)
  * First matching rule wins
+ * Updates rule_index with the matched rule index (or -1 if no match)
  */
 static __always_inline __u8 find_matching_rule(
 	__u32 packet_ip,
 	__u8 protocol,
 	__u16 src_port,
-	__u16 dst_port
+	__u16 dst_port,
+	__u32 *rule_index
 ) {
 	__u8 action = ACTION_ALLOW; /* Default: allow */
 	__u32 i;
+	*rule_index = (__u32)-1; /* No match initially */
 
 	/* Bounded loop for BPF verifier compliance */
 	#pragma unroll
@@ -178,6 +192,7 @@ static __always_inline __u8 find_matching_rule(
 
 		if (rule_matches(rule, packet_ip, protocol, src_port, dst_port)) {
 			action = rule->action;
+			*rule_index = i;
 			break; /* First match wins */
 		}
 	}
@@ -215,11 +230,23 @@ int xdp_firewall(struct xdp_md *ctx) {
 	__u32 packet_ip = bpf_ntohl(iph->saddr);
 	__u8 protocol = iph->protocol;
 	__u16 src_port, dst_port;
+	__u32 matched_rule_idx;
 	
 	extract_ports(iph, data_end, protocol, &src_port, &dst_port);
 
 	/* Find matching firewall rule */
-	__u8 action = find_matching_rule(packet_ip, protocol, src_port, dst_port);
+	__u8 action = find_matching_rule(packet_ip, protocol, src_port, dst_port, &matched_rule_idx);
+
+	/* Update statistics if a rule matched */
+	if (matched_rule_idx != (__u32)-1) {
+		struct rule_stats *stats = bpf_map_lookup_elem(&rule_stats_map, &matched_rule_idx);
+		if (stats) {
+			/* Calculate packet size */
+			__u64 packet_size = (__u64)(data_end - data);
+			__sync_fetch_and_add(&stats->packets, 1);
+			__sync_fetch_and_add(&stats->bytes, packet_size);
+		}
+	}
 
 	/* Log the event */
 	log_packet(packet_ip, action);

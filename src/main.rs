@@ -75,6 +75,11 @@ enum Commands {
         #[command(subcommand)]
         command: DeleteCommands,
     },
+    /// Show statistics
+    Stats {
+        #[command(subcommand)]
+        command: StatsCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -97,6 +102,18 @@ enum DeleteCommands {
         /// Name of the rule to delete
         name: String,
     },
+}
+
+#[derive(Subcommand)]
+enum StatsCommands {
+    /// Show statistics for all rules
+    Show {
+        /// Output format
+        #[arg(short, long, value_enum, default_value = "yaml")]
+        output: OutputFormat,
+    },
+    /// Reset all statistics
+    Reset,
 }
 
 #[tokio::main]
@@ -126,6 +143,16 @@ async fn main() -> Result<()> {
             match command {
                 DeleteCommands::Rule { name } => {
                     delete_rule(&name).await?;
+                }
+            }
+        }
+        Commands::Stats { command } => {
+            match command {
+                StatsCommands::Show { output } => {
+                    show_stats(output)?;
+                }
+                StatsCommands::Reset => {
+                    reset_stats()?;
                 }
             }
         }
@@ -241,8 +268,25 @@ async fn run_tui() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(tx_cmd, rx_log, existing_rules);
+    
+    // Update stats periodically
+    let mut stats_interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
 
     loop {
+        // Update app logs
+        app.update().await;
+        
+        // Periodically update statistics
+        tokio::select! {
+            _ = stats_interval.tick() => {
+                if let Ok(maps) = open_pinned_maps() {
+                    if let Ok(stats_map) = maps.get_stats_by_name() {
+                        app.update_stats(stats_map);
+                    }
+                }
+            }
+        }
+        
         terminal.draw(|f| render_ui::<CrosstermBackend<io::Stdout>>(f, &mut app))?;
         if handle_events(&mut app).await? {
             break; 
@@ -429,4 +473,85 @@ async fn delete_rule(name: &str) -> Result<()> {
     println!("Rule is now inactive in the eBPF firewall.");
     
     Ok(())
+}
+
+fn show_stats(format: OutputFormat) -> Result<()> {
+    use serde::{Serialize, Deserialize};
+    
+    #[derive(Serialize, Deserialize)]
+    struct RuleStatsOutput {
+        name: String,
+        packets: u64,
+        bytes: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        human_readable_bytes: Option<String>,
+    }
+    
+    let maps = open_pinned_maps()?;
+    let stats = maps.get_stats_by_name()
+        .context("Failed to get statistics from BPF maps")?;
+    
+    if stats.is_empty() {
+        println!("No statistics available (no packets matched any rules)");
+        return Ok(());
+    }
+    
+    let mut stats_list: Vec<RuleStatsOutput> = stats.iter()
+        .map(|(name, (packets, bytes))| {
+            let human_readable = format_bytes_human(*bytes);
+            RuleStatsOutput {
+                name: name.clone(),
+                packets: *packets,
+                bytes: *bytes,
+                human_readable_bytes: Some(human_readable),
+            }
+        })
+        .collect();
+    
+    // Sort by packets descending
+    stats_list.sort_by(|a, b| b.packets.cmp(&a.packets));
+    
+    let output = match format {
+        OutputFormat::Yaml => {
+            serde_yaml::to_string(&stats_list)
+                .context("Failed to serialize stats to YAML")?
+        }
+        OutputFormat::Json => {
+            serde_json::to_string_pretty(&stats_list)
+                .context("Failed to serialize stats to JSON")?
+        }
+    };
+    
+    println!("{}", output);
+    
+    // Summary
+    let total_packets: u64 = stats_list.iter().map(|s| s.packets).sum();
+    let total_bytes: u64 = stats_list.iter().map(|s| s.bytes).sum();
+    println!("\nTotal: {} packets, {} bytes ({})", 
+        total_packets, total_bytes, format_bytes_human(total_bytes));
+    
+    Ok(())
+}
+
+fn reset_stats() -> Result<()> {
+    let maps = open_pinned_maps()?;
+    
+    maps.reset_all_stats()
+        .context("Failed to reset statistics")?;
+    
+    println!("✓ All statistics have been reset");
+    
+    Ok(())
+}
+
+fn format_bytes_human(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.2} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.2} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1_024 {
+        format!("{:.2} KB", bytes as f64 / 1_024.0)
+    } else {
+        format!("{} B", bytes)
+    }
 }

@@ -67,4 +67,13 @@ struct log_event {
     __u32 action;    /* ACTION_ALLOW or ACTION_DROP */
 };
 
+/* 
+ * Rule statistics structure
+ * Tracks packet and byte counts per rule
+ */
+struct rule_stats {
+    __u64 packets;   /* Total packets matched */
+    __u64 bytes;     /* Total bytes matched */
+};
+
 #endif /* __FIREBEE_COMMON_H__ */
