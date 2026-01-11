@@ -29,12 +29,24 @@ pub fn render_ui<B: Backend>(f: &mut Frame, app: &mut App) {
         
         let description = r.description.as_deref().unwrap_or("-");
         
+        // Format stats - get from app.rule_stats if available
+        let (packets, bytes) = app.rule_stats.get(&r.name)
+            .map(|(p, b)| (*p, *b))
+            .unwrap_or((0, 0));
+        
+        let stats = if packets > 0 {
+            format!("{} pkts / {}", format_number(packets), format_bytes(bytes))
+        } else {
+            "-".to_string()
+        };
+        
         Row::new(vec![
             r.name.clone(),
             r.ip.clone(),
             protocol,
             ports,
             action.to_string(),
+            stats,
             description.to_string(),
         ])
     });
@@ -42,16 +54,17 @@ pub fn render_ui<B: Backend>(f: &mut Frame, app: &mut App) {
     let rules_table = Table::new(
         rules,
         [
-            Constraint::Percentage(15),  // Name
-            Constraint::Percentage(20),  // IP/CIDR
-            Constraint::Percentage(10),  // Protocol
-            Constraint::Percentage(10),  // Ports
-            Constraint::Percentage(10),  // Action
-            Constraint::Percentage(35),  // Description
+            Constraint::Percentage(12),  // Name
+            Constraint::Percentage(15),  // IP/CIDR
+            Constraint::Percentage(8),   // Protocol
+            Constraint::Percentage(8),   // Ports
+            Constraint::Percentage(8),   // Action
+            Constraint::Percentage(18),  // Stats
+            Constraint::Percentage(31),  // Description
         ]
     )
         .header(
-            Row::new(vec!["Name", "IP/CIDR", "Protocol", "Ports", "Action", "Description"])
+            Row::new(vec!["Name", "IP/CIDR", "Protocol", "Ports", "Action", "Stats", "Description"])
                 .style(Style::default().add_modifier(Modifier::BOLD)),
         )
         .block(Block::default().borders(Borders::ALL).title("Rules"));
@@ -106,6 +119,30 @@ pub fn render_ui<B: Backend>(f: &mut Frame, app: &mut App) {
         let area = centered_rect(60, 40, f.area());
         f.render_widget(Clear, area);
         f.render_widget(popup, area);
+    }
+}
+
+fn format_number(n: u64) -> String {
+    if n >= 1_000_000_000 {
+        format!("{:.1}B", n as f64 / 1_000_000_000.0)
+    } else if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        format!("{}", n)
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1}GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.1}MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1_024 {
+        format!("{:.1}KB", bytes as f64 / 1_024.0)
+    } else {
+        format!("{}B", bytes)
     }
 }
 

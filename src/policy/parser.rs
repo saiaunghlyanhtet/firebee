@@ -20,6 +20,13 @@ pub struct PolicyRule {
     pub dst_port: Option<u16>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PolicyRuleWithStats {
+    pub rule: PolicyRule,
+    pub packets: u64,
+    pub bytes: u64,
+}
+
 fn default_protocol() -> String {
     "any".to_string()
 }

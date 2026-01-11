@@ -1,5 +1,6 @@
 use crate::models::rule::{Action, Rule};
 use crate::policy::PolicyRule;
+use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use tokio::sync::mpsc;
 
@@ -16,6 +17,7 @@ pub struct App {
     pub input_mode: bool,
     pub confirm_unload: bool,
     pub unload_requested: bool,
+    pub rule_stats: HashMap<String, (u64, u64)>, // name -> (packets, bytes)
     cmd_tx: mpsc::Sender<Command>,
     log_rx: mpsc::Receiver<String>,
 }
@@ -29,9 +31,14 @@ impl App {
             input_mode: false,
             confirm_unload: false,
             unload_requested: false,
+            rule_stats: HashMap::new(),
             cmd_tx,
             log_rx,
         }
+    }
+    
+    pub fn update_stats(&mut self, stats: HashMap<String, (u64, u64)>) {
+        self.rule_stats = stats;
     }
 
     pub async fn update(&mut self) {

@@ -27,6 +27,13 @@ pub struct RuleKey {
 }
 
 #[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RuleStats {
+    pub packets: u64,
+    pub bytes: u64,
+}
+
+#[repr(C)]
 #[derive(Debug, Clone)]
 pub struct RuleMetadata {
     pub ip: u32,
@@ -125,6 +132,7 @@ pub struct BpfMaps<'a> {
     pub rules: Map<'a>,
     pub log_events: Map<'a>,
     pub metadata: Map<'a>,
+    pub stats: Map<'a>,
 }
 
 impl<'a> BpfMaps<'a> {
@@ -132,6 +140,7 @@ impl<'a> BpfMaps<'a> {
         let mut rules_map = None;
         let mut metadata_map = None;
         let mut log_events_map = None;
+        let mut stats_map = None;
         
         for map in obj.maps() {
             let name = map.name().to_string_lossy();
@@ -139,6 +148,7 @@ impl<'a> BpfMaps<'a> {
                 "rules_map" => rules_map = Some(map),
                 "rule_metadata_map" => metadata_map = Some(map),
                 "log_events" => log_events_map = Some(map),
+                "rule_stats_map" => stats_map = Some(map),
                 _ => {}
             }
         }
@@ -146,8 +156,9 @@ impl<'a> BpfMaps<'a> {
         let rules = rules_map.expect("rules_map not found");
         let metadata = metadata_map.expect("rule_metadata_map not found");
         let log_events = log_events_map.expect("log_events not found");
+        let stats = stats_map.expect("rule_stats_map not found");
         
-        BpfMaps { rules, log_events, metadata }
+        BpfMaps { rules, log_events, metadata, stats }
     }
 
     pub fn update_rule(&self, rule: &Rule, action: u8) -> Result<(), libbpf_rs::Error> {
@@ -390,4 +401,118 @@ impl<'a> BpfMaps<'a> {
         
         Ok(rules)
     }
+    
+    /// Get statistics for a specific rule by index
+    pub fn get_rule_stats(&self, index: u32) -> Result<Option<RuleStats>, libbpf_rs::Error> {
+        let index_bytes = index.to_ne_bytes();
+        
+        if let Some(value) = self.stats.lookup(&index_bytes, libbpf_rs::MapFlags::ANY)? {
+            if value.len() >= std::mem::size_of::<RuleStats>() {
+                let stats = unsafe {
+                    std::ptr::read(value.as_ptr() as *const RuleStats)
+                };
+                return Ok(Some(stats));
+            }
+        }
+        Ok(None)
+    }
+    
+    /// Get statistics for all rules
+    pub fn get_all_stats(&self) -> Result<Vec<(u32, RuleStats)>, libbpf_rs::Error> {
+        let mut stats_list = Vec::new();
+        
+        for i in 0..1024u32 {
+            let i_bytes = i.to_ne_bytes();
+            if let Some(value) = self.stats.lookup(&i_bytes, libbpf_rs::MapFlags::ANY)? {
+                if value.len() >= std::mem::size_of::<RuleStats>() {
+                    let stats = unsafe {
+                        std::ptr::read(value.as_ptr() as *const RuleStats)
+                    };
+                    // Only include non-zero stats
+                    if stats.packets > 0 || stats.bytes > 0 {
+                        stats_list.push((i, stats));
+                    }
+                }
+            }
+        }
+        
+        Ok(stats_list)
+    }
+    
+    /// Reset statistics for a specific rule
+    pub fn reset_rule_stats(&self, index: u32) -> Result<(), libbpf_rs::Error> {
+        let index_bytes = index.to_ne_bytes();
+        let zero_stats = RuleStats {
+            packets: 0,
+            bytes: 0,
+        };
+        
+        let stats_bytes = unsafe {
+            std::slice::from_raw_parts(
+                &zero_stats as *const RuleStats as *const u8,
+                std::mem::size_of::<RuleStats>()
+            )
+        };
+        
+        self.stats.update(&index_bytes, stats_bytes, libbpf_rs::MapFlags::ANY)?;
+        Ok(())
+    }
+    
+    /// Reset all statistics
+    pub fn reset_all_stats(&self) -> Result<(), libbpf_rs::Error> {
+        for i in 0..1024u32 {
+            self.reset_rule_stats(i)?;
+        }
+        Ok(())
+    }
+    
+    /// Get statistics mapped to rule names
+    /// Returns a HashMap of rule_name -> (packets, bytes)
+    pub fn get_stats_by_name(&self) -> Result<std::collections::HashMap<String, (u64, u64)>, libbpf_rs::Error> {
+        use std::collections::HashMap;
+        
+        let mut stats_map = HashMap::new();
+        
+        // First, build a map of rule attributes to index
+        let mut rule_index_map: HashMap<(u32, u32, u8, u16, u16), u32> = HashMap::new();
+        
+        for i in 0..1024u32 {
+            let i_bytes = i.to_ne_bytes();
+            if let Some(value) = self.rules.lookup(&i_bytes, libbpf_rs::MapFlags::ANY)? {
+                if value.len() >= std::mem::size_of::<RuleEntry>() {
+                    let entry = unsafe {
+                        std::ptr::read(value.as_ptr() as *const RuleEntry)
+                    };
+                    
+                    if entry.valid == 1 {
+                        let key = (entry.src_ip, entry.subnet_mask, entry.protocol, entry.src_port, entry.dst_port);
+                        rule_index_map.insert(key, i);
+                    }
+                }
+            }
+        }
+        
+        // Now iterate through metadata and match with stats
+        for key in self.metadata.keys() {
+            if let Some(value) = self.metadata.lookup(&key, libbpf_rs::MapFlags::ANY)? {
+                if value.len() >= std::mem::size_of::<RuleMetadata>() {
+                    let metadata = unsafe {
+                        std::ptr::read(value.as_ptr() as *const RuleMetadata)
+                    };
+                    
+                    let rule_key = (metadata.ip, metadata.subnet_mask, metadata.protocol, metadata.src_port, metadata.dst_port);
+                    
+                    if let Some(&index) = rule_index_map.get(&rule_key) {
+                        if let Ok(Some(stats)) = self.get_rule_stats(index) {
+                            let name = metadata.get_name();
+                            stats_map.insert(name, (stats.packets, stats.bytes));
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok(stats_map)
+    }
 }
+
