@@ -1,4 +1,4 @@
-use crate::models::rule::{Action, Rule};
+use crate::models::rule::{Action, Direction, Rule};
 use crate::policy::PolicyRule;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
@@ -57,6 +57,7 @@ impl App {
                 subnet_mask: None,
                 action: action.clone(),
                 protocol: crate::models::rule::Protocol::Any,
+                direction: Direction::Ingress,
                 src_port: None,
                 dst_port: None,
             };
@@ -70,6 +71,7 @@ impl App {
                 },
                 description: None,
                 protocol: "any".to_string(),
+                direction: "ingress".to_string(),
                 src_port: None,
                 dst_port: None,
             };

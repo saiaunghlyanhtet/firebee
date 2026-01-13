@@ -1,11 +1,12 @@
 /*
- * Firebee XDP Firewall - BPF Program
+ * Firebee TC-BPF Egress Firewall - BPF Program
  * 
- * High-performance packet filtering using eBPF/XDP
- * Supports CIDR notation, protocol filtering, and port matching
+ * High-performance egress packet filtering using TC-BPF
+ * Supports CIDR notation, protocol filtering, and port matching for outgoing traffic
  */
 
 #include <linux/bpf.h>
+#include <linux/pkt_cls.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
 #include <linux/tcp.h>
@@ -18,17 +19,17 @@
 
 #define ETH_P_IP 0x0800
 
-/* Maps are now defined in firebee_common.h and shared with TC program */
+/* Maps are now defined in firebee_common.h and shared with XDP program */
 
 /* ========================================================================
- * Packet Parsing Helpers
+ * Packet Parsing Helpers (reuse from firebee_helpers.h)
  * ======================================================================== */
 
 /*
  * Extract transport layer ports from packet
  * Only applies to TCP and UDP protocols
  */
-static __always_inline void extract_ports(
+static __always_inline void extract_ports_egress(
 	struct iphdr *iph,
 	void *data_end,
 	__u8 protocol,
@@ -60,10 +61,10 @@ static __always_inline void extract_ports(
 /*
  * Log packet event to ring buffer for userspace
  */
-static __always_inline void log_packet(__u32 src_ip, __u8 action) {
+static __always_inline void log_packet_egress(__u32 dst_ip, __u8 action) {
 	struct log_event *event = bpf_ringbuf_reserve(&log_events, sizeof(*event), 0);
 	if (event) {
-		event->src_ip = src_ip;
+		event->src_ip = dst_ip;  // For egress, log destination IP
 		event->action = action;
 		bpf_ringbuf_submit(event, 0);
 	}
@@ -74,13 +75,10 @@ static __always_inline void log_packet(__u32 src_ip, __u8 action) {
  * ======================================================================== */
 
 /*
- * Check if packet matches a specific rule
- * Returns 1 if all conditions match, 0 otherwise
- * 
- * Note: XDP programs only see ingress traffic by default.
- * Direction filtering is implemented for future TC-BPF egress support.
+ * Check if packet matches a specific rule (egress version)
+ * For egress traffic, we check the destination IP
  */
-static __always_inline int rule_matches(
+static __always_inline int rule_matches_egress(
 	struct rule_entry *rule,
 	__u32 packet_ip,
 	__u8 protocol,
@@ -93,7 +91,7 @@ static __always_inline int rule_matches(
 		return 0;
 	}
 
-	/* Check IP with CIDR support */
+	/* Check IP with CIDR support (for egress, match destination IP) */
 	if (!ip_matches(packet_ip, rule->src_ip, rule->subnet_mask)) {
 		return 0;
 	}
@@ -117,12 +115,11 @@ static __always_inline int rule_matches(
 }
 
 /*
- * Find matching rule for packet and update statistics
+ * Find matching rule for egress packet and update statistics
  * Returns action (ACTION_ALLOW or ACTION_DROP)
  * First matching rule wins
- * Updates rule_index with the matched rule index (or -1 if no match)
  */
-static __always_inline __u8 find_matching_rule(
+static __always_inline __u8 find_matching_rule_egress(
 	__u32 packet_ip,
 	__u8 protocol,
 	__u16 src_port,
@@ -134,19 +131,27 @@ static __always_inline __u8 find_matching_rule(
 	__u32 i;
 	*rule_index = (__u32)-1; /* No match initially */
 
-	/* Bounded loop for BPF verifier compliance */
-	#pragma unroll
-	for (i = 0; i < MAX_RULES; i++) {
+	/* Bounded loop for BPF verifier compliance - check first 64 rules */
+	for (i = 0; i < 64 && i < MAX_RULES; i++) {
 		__u32 key = i;
 		struct rule_entry *rule = bpf_map_lookup_elem(&rules_map, &key);
 		
-		if (!rule || !rule->valid) {
+		bpf_printk("TC egress: loop iteration %d, rule ptr: %p", i, rule);
+		
+		if (!rule) {
+			continue;
+		}
+		
+		bpf_printk("TC egress: checking rule %d: ip=%u, dir=%d, valid=%d", i, rule->src_ip, rule->direction, rule->valid);
+		
+		if (!rule->valid) {
 			continue;
 		}
 
-		if (rule_matches(rule, packet_ip, protocol, src_port, dst_port, packet_direction)) {
+		if (rule_matches_egress(rule, packet_ip, protocol, src_port, dst_port, packet_direction)) {
 			action = rule->action;
 			*rule_index = i;
+			bpf_printk("TC egress: MATCHED rule %d", i);
 			break; /* First match wins */
 		}
 	}
@@ -155,42 +160,46 @@ static __always_inline __u8 find_matching_rule(
 }
 
 /* ========================================================================
- * XDP Main Program
+ * TC-BPF Egress Main Program
  * ======================================================================== */
 
-SEC("xdp")
-int xdp_firewall(struct xdp_md *ctx) {
-	void *data = (void *)(long)ctx->data;
-	void *data_end = (void *)(long)ctx->data_end;
+SEC("tc")
+int tc_egress_firewall(struct __sk_buff *skb) {
+	void *data = (void *)(long)skb->data;
+	void *data_end = (void *)(long)skb->data_end;
 	
 	/* Parse Ethernet header */
 	struct ethhdr *eth = data;
 	if ((void *)(eth + 1) > data_end) {
-		return XDP_PASS;
+		return TC_ACT_OK;
 	}
 
 	/* Only process IPv4 packets */
 	if (eth->h_proto != bpf_htons(ETH_P_IP)) {
-		return XDP_PASS;
+		return TC_ACT_OK;
 	}
 	
 	/* Parse IP header */
 	struct iphdr *iph = (void *)(eth + 1);
 	if ((void *)(iph + 1) > data_end) {
-		return XDP_PASS;
+		return TC_ACT_OK;
 	}
 
-	/* Extract packet information */
-	__u32 packet_ip = bpf_ntohl(iph->saddr);
+	/* Extract packet information - for egress, check destination IP */
+	__u32 packet_ip = bpf_ntohl(iph->daddr);
 	__u8 protocol = iph->protocol;
 	__u16 src_port, dst_port;
 	__u32 matched_rule_idx;
-	__u8 packet_direction = DIRECTION_INGRESS; /* XDP only sees ingress traffic */
+	__u8 packet_direction = DIRECTION_EGRESS; /* TC egress hook */
 	
-	extract_ports(iph, data_end, protocol, &src_port, &dst_port);
+	bpf_printk("TC egress: packet to %pI4, proto %d", &iph->daddr, protocol);
+	
+	extract_ports_egress(iph, data_end, protocol, &src_port, &dst_port);
 
 	/* Find matching firewall rule */
-	__u8 action = find_matching_rule(packet_ip, protocol, src_port, dst_port, packet_direction, &matched_rule_idx);
+	__u8 action = find_matching_rule_egress(packet_ip, protocol, src_port, dst_port, packet_direction, &matched_rule_idx);
+
+	bpf_printk("TC egress: matched rule idx %d, action %d", matched_rule_idx, action);
 
 	/* Update statistics if a rule matched */
 	if (matched_rule_idx != (__u32)-1) {
@@ -204,10 +213,14 @@ int xdp_firewall(struct xdp_md *ctx) {
 	}
 
 	/* Log the event */
-	log_packet(packet_ip, action);
+	log_packet_egress(packet_ip, action);
 
 	/* Apply action */
-	return (action == ACTION_DROP) ? XDP_DROP : XDP_PASS;
+	if (action == ACTION_DROP) {
+		bpf_printk("TC egress: DROPPING packet");
+		return TC_ACT_SHOT;
+	}
+	return TC_ACT_OK;
 }
 
 char _license[] SEC("license") = "GPL";

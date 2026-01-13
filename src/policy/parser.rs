@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::Ipv4Addr;
 use std::path::Path;
-use crate::models::rule::{Action, Protocol, Rule};
+use crate::models::rule::{Action, Direction, Protocol, Rule};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyRule {
@@ -14,21 +14,20 @@ pub struct PolicyRule {
     pub description: Option<String>,
     #[serde(default = "default_protocol")]
     pub protocol: String,
+    #[serde(default = "default_direction")]
+    pub direction: String,
     #[serde(default)]
     pub src_port: Option<u16>,
     #[serde(default)]
     pub dst_port: Option<u16>,
 }
 
-#[derive(Debug, Clone)]
-pub struct PolicyRuleWithStats {
-    pub rule: PolicyRule,
-    pub packets: u64,
-    pub bytes: u64,
-}
-
 fn default_protocol() -> String {
     "any".to_string()
+}
+
+fn default_direction() -> String {
+    "ingress".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -72,11 +71,19 @@ impl PolicyRule {
             _ => anyhow::bail!("Invalid protocol '{}' in rule '{}'. Must be tcp, udp, icmp, or any", self.protocol, self.name),
         };
 
+        let direction = match self.direction.to_lowercase().as_str() {
+            "ingress" | "in" | "input" => Direction::Ingress,
+            "egress" | "out" | "output" => Direction::Egress,
+            "both" | "any" => Direction::Both,
+            _ => anyhow::bail!("Invalid direction '{}' in rule '{}'. Must be ingress, egress, or both", self.direction, self.name),
+        };
+
         Ok(Rule { 
             ip, 
             subnet_mask,
             action,
             protocol,
+            direction,
             src_port: self.src_port,
             dst_port: self.dst_port,
         })
@@ -116,6 +123,7 @@ mod tests {
             protocol: protocol.to_string(),
             src_port: None,
             dst_port: None,
+            direction: "ingress".to_string(),
         }
     }
 
@@ -332,6 +340,7 @@ mod tests {
             protocol: "tcp".to_string(),
             src_port: Some(443),
             dst_port: Some(80),
+            direction: "ingress".to_string(),
         };
         
         let result = rule.to_rule();

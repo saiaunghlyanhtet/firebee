@@ -1,6 +1,6 @@
 use libbpf_rs::{Map, MapCore};
 use std::net::Ipv4Addr;
-use crate::models::rule::{Action, Protocol, Rule};
+use crate::models::rule::{Action, Direction, Protocol, Rule};
 use crate::policy::PolicyRule;
 
 #[repr(C)]
@@ -10,10 +10,11 @@ pub struct RuleEntry {
     pub subnet_mask: u32,
     pub protocol: u8,
     pub action: u8,
+    pub direction: u8,
+    pub valid: u8,
     pub src_port: u16,
     pub dst_port: u16,
-    pub valid: u8,
-    pub _padding: [u8; 3],
+    pub _padding: [u8; 2],
 }
 
 #[repr(C)]
@@ -40,6 +41,8 @@ pub struct RuleMetadata {
     pub subnet_mask: u32,
     pub action: u8,
     pub protocol: u8,
+    pub direction: u8,
+    pub _padding: u8,
     pub src_port: u16,
     pub dst_port: u16,
     pub name: [u8; 64],
@@ -52,6 +55,7 @@ impl RuleMetadata {
         subnet_mask: u32,
         action: u8, 
         protocol: u8,
+        direction: u8,
         src_port: Option<u16>,
         dst_port: Option<u16>,
         name: &str, 
@@ -73,6 +77,8 @@ impl RuleMetadata {
             subnet_mask,
             action,
             protocol,
+            direction,
+            _padding: 0,
             src_port: src_port.unwrap_or(0),
             dst_port: dst_port.unwrap_or(0),
             name: name_bytes,
@@ -121,6 +127,12 @@ impl RuleMetadata {
                 17 => "udp".to_string(),
                 1 => "icmp".to_string(),
                 _ => "any".to_string(),
+            },
+            direction: match self.direction {
+                0 => "ingress".to_string(),
+                1 => "egress".to_string(),
+                2 => "both".to_string(),
+                _ => "ingress".to_string(),
             },
             src_port: if self.src_port == 0 { None } else { Some(self.src_port) },
             dst_port: if self.dst_port == 0 { None } else { Some(self.dst_port) },
@@ -173,10 +185,11 @@ impl<'a> BpfMaps<'a> {
             subnet_mask,
             protocol: rule.protocol.to_u8(),
             action,
+            direction: rule.direction.to_u8(),
+            valid: 1,
             src_port: rule.src_port.unwrap_or(0),
             dst_port: rule.dst_port.unwrap_or(0),
-            valid: 1,
-            _padding: [0; 3],
+            _padding: [0; 2],
         };
         
         let entry_bytes = unsafe {
@@ -202,6 +215,7 @@ impl<'a> BpfMaps<'a> {
                        existing.src_ip == ip_u32 &&
                        existing.subnet_mask == subnet_mask &&
                        existing.protocol == rule.protocol.to_u8() &&
+                       existing.direction == rule.direction.to_u8() &&
                        existing.src_port == rule.src_port.unwrap_or(0) &&
                        existing.dst_port == rule.dst_port.unwrap_or(0) {
                         slot_index = Some(i);
@@ -319,6 +333,7 @@ impl<'a> BpfMaps<'a> {
                         subnet_mask,
                         action,
                         protocol,
+                        direction: Direction::from_u8(entry.direction),
                         src_port: if entry.src_port == 0 { None } else { Some(entry.src_port) },
                         dst_port: if entry.dst_port == 0 { None } else { Some(entry.dst_port) },
                     });
@@ -338,6 +353,7 @@ impl<'a> BpfMaps<'a> {
             subnet_mask,
             action,
             rule.protocol.to_u8(),
+            rule.direction.to_u8(),
             rule.src_port,
             rule.dst_port,
             name,
