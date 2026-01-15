@@ -532,3 +532,356 @@ impl<'a> BpfMaps<'a> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rule_metadata_new() {
+        let metadata = RuleMetadata::new(
+            Ipv4Addr::new(192, 168, 1, 1),
+            0xFFFFFFFF,
+            1,
+            6,
+            0,
+            Some(8080),
+            Some(443),
+            "test_rule",
+            Some("Test description"),
+        );
+        
+        assert_eq!(metadata.action, 1);
+        assert_eq!(metadata.protocol, 6);
+        assert_eq!(metadata.direction, 0);
+        assert_eq!(metadata.src_port, 8080);
+        assert_eq!(metadata.dst_port, 443);
+    }
+
+    #[test]
+    fn test_rule_metadata_get_name() {
+        let metadata = RuleMetadata::new(
+            Ipv4Addr::new(192, 168, 1, 1),
+            0xFFFFFFFF,
+            1,
+            6,
+            0,
+            None,
+            None,
+            "my_firewall_rule",
+            None,
+        );
+        
+        assert_eq!(metadata.get_name(), "my_firewall_rule");
+    }
+
+    #[test]
+    fn test_rule_metadata_long_name_truncation() {
+        let long_name = "a".repeat(100);
+        let metadata = RuleMetadata::new(
+            Ipv4Addr::new(192, 168, 1, 1),
+            0xFFFFFFFF,
+            1,
+            6,
+            0,
+            None,
+            None,
+            &long_name,
+            None,
+        );
+        
+        let result_name = metadata.get_name();
+        assert!(result_name.len() <= 63);
+        assert_eq!(result_name, "a".repeat(63));
+    }
+
+    #[test]
+    fn test_rule_metadata_get_description_some() {
+        let metadata = RuleMetadata::new(
+            Ipv4Addr::new(192, 168, 1, 1),
+            0xFFFFFFFF,
+            1,
+            6,
+            0,
+            None,
+            None,
+            "test",
+            Some("Block malicious traffic"),
+        );
+        
+        assert_eq!(metadata.get_description(), Some("Block malicious traffic".to_string()));
+    }
+
+    #[test]
+    fn test_rule_metadata_get_description_none() {
+        let metadata = RuleMetadata::new(
+            Ipv4Addr::new(192, 168, 1, 1),
+            0xFFFFFFFF,
+            1,
+            6,
+            0,
+            None,
+            None,
+            "test",
+            None,
+        );
+        
+        assert_eq!(metadata.get_description(), None);
+    }
+
+    #[test]
+    fn test_rule_metadata_long_description_truncation() {
+        let long_desc = "b".repeat(200);
+        let metadata = RuleMetadata::new(
+            Ipv4Addr::new(192, 168, 1, 1),
+            0xFFFFFFFF,
+            1,
+            6,
+            0,
+            None,
+            None,
+            "test",
+            Some(&long_desc),
+        );
+        
+        let result_desc = metadata.get_description().unwrap();
+        assert!(result_desc.len() <= 127);
+        assert_eq!(result_desc, "b".repeat(127));
+    }
+
+    #[test]
+    fn test_rule_metadata_get_ip() {
+        let metadata = RuleMetadata::new(
+            Ipv4Addr::new(10, 0, 0, 1),
+            0xFFFFFFFF,
+            1,
+            6,
+            0,
+            None,
+            None,
+            "test",
+            None,
+        );
+        
+        assert_eq!(metadata.get_ip(), Ipv4Addr::new(10, 0, 0, 1));
+    }
+
+    #[test]
+    fn test_rule_metadata_get_cidr_exact_match() {
+        let metadata = RuleMetadata::new(
+            Ipv4Addr::new(192, 168, 1, 1),
+            0xFFFFFFFF,
+            1,
+            6,
+            0,
+            None,
+            None,
+            "test",
+            None,
+        );
+        
+        assert_eq!(metadata.get_cidr(), "192.168.1.1");
+    }
+
+    #[test]
+    fn test_rule_metadata_get_cidr_with_prefix() {
+        let metadata = RuleMetadata::new(
+            Ipv4Addr::new(192, 168, 1, 0),
+            0xFFFFFF00, // /24
+            1,
+            6,
+            0,
+            None,
+            None,
+            "test",
+            None,
+        );
+        
+        assert_eq!(metadata.get_cidr(), "192.168.1.0/24");
+    }
+
+    #[test]
+    fn test_rule_metadata_get_cidr_zero_prefix() {
+        let metadata = RuleMetadata::new(
+            Ipv4Addr::new(0, 0, 0, 0),
+            0,
+            1,
+            6,
+            0,
+            None,
+            None,
+            "test",
+            None,
+        );
+        
+        assert_eq!(metadata.get_cidr(), "0.0.0.0/0");
+    }
+
+    #[test]
+    fn test_rule_metadata_to_policy_rule_allow() {
+        let metadata = RuleMetadata::new(
+            Ipv4Addr::new(192, 168, 1, 1),
+            0xFFFFFFFF,
+            1, // allow
+            6, // tcp
+            0, // ingress
+            Some(8080),
+            Some(443),
+            "allow_https",
+            Some("Allow HTTPS traffic"),
+        );
+        
+        let policy = metadata.to_policy_rule();
+        assert_eq!(policy.name, "allow_https");
+        assert_eq!(policy.ip, "192.168.1.1");
+        assert_eq!(policy.action, "allow");
+        assert_eq!(policy.protocol, "tcp");
+        assert_eq!(policy.direction, "ingress");
+        assert_eq!(policy.src_port, Some(8080));
+        assert_eq!(policy.dst_port, Some(443));
+        assert_eq!(policy.description, Some("Allow HTTPS traffic".to_string()));
+    }
+
+    #[test]
+    fn test_rule_metadata_to_policy_rule_drop() {
+        let metadata = RuleMetadata::new(
+            Ipv4Addr::new(10, 0, 0, 1),
+            0xFFFFFFFF,
+            0, // drop
+            17, // udp
+            1, // egress
+            None,
+            None,
+            "drop_udp",
+            None,
+        );
+        
+        let policy = metadata.to_policy_rule();
+        assert_eq!(policy.action, "drop");
+        assert_eq!(policy.protocol, "udp");
+        assert_eq!(policy.direction, "egress");
+        assert_eq!(policy.src_port, None);
+        assert_eq!(policy.dst_port, None);
+        assert_eq!(policy.description, None);
+    }
+
+    #[test]
+    fn test_rule_metadata_protocol_conversions() {
+        let test_cases = vec![
+            (6, "tcp"),
+            (17, "udp"),
+            (1, "icmp"),
+            (255, "any"),
+            (99, "any"), // unknown defaults to any
+        ];
+        
+        for (protocol_u8, expected) in test_cases {
+            let metadata = RuleMetadata::new(
+                Ipv4Addr::new(192, 168, 1, 1),
+                0xFFFFFFFF,
+                1,
+                protocol_u8,
+                0,
+                None,
+                None,
+                "test",
+                None,
+            );
+            
+            let policy = metadata.to_policy_rule();
+            assert_eq!(policy.protocol, expected);
+        }
+    }
+
+    #[test]
+    fn test_rule_metadata_direction_conversions() {
+        let test_cases = vec![
+            (0, "ingress"),
+            (1, "egress"),
+            (2, "both"),
+            (99, "ingress"), // unknown defaults to ingress
+        ];
+        
+        for (direction_u8, expected) in test_cases {
+            let metadata = RuleMetadata::new(
+                Ipv4Addr::new(192, 168, 1, 1),
+                0xFFFFFFFF,
+                1,
+                6,
+                direction_u8,
+                None,
+                None,
+                "test",
+                None,
+            );
+            
+            let policy = metadata.to_policy_rule();
+            assert_eq!(policy.direction, expected);
+        }
+    }
+
+    #[test]
+    fn test_rule_metadata_port_zero_means_none() {
+        let metadata = RuleMetadata::new(
+            Ipv4Addr::new(192, 168, 1, 1),
+            0xFFFFFFFF,
+            1,
+            6,
+            0,
+            None,
+            None,
+            "test",
+            None,
+        );
+        
+        let policy = metadata.to_policy_rule();
+        assert_eq!(policy.src_port, None);
+        assert_eq!(policy.dst_port, None);
+    }
+
+    #[test]
+    fn test_rule_entry_fields() {
+        let entry = RuleEntry {
+            src_ip: u32::from_be_bytes([192, 168, 1, 1]),
+            subnet_mask: 0xFFFFFFFF,
+            protocol: 6,
+            action: 1,
+            direction: 0,
+            valid: 1,
+            src_port: 8080,
+            dst_port: 443,
+            _padding: [0; 2],
+        };
+        assert_eq!(entry.action, 1);
+        assert_eq!(entry.protocol, 6);
+        assert_eq!(entry.src_port, 8080);
+        assert_eq!(entry.dst_port, 443);
+        assert_eq!(entry.valid, 1);
+    }
+
+    #[test]
+    fn test_rule_stats_default() {
+        let stats = RuleStats {
+            packets: 0,
+            bytes: 0,
+        };
+        assert_eq!(stats.packets, 0);
+        assert_eq!(stats.bytes, 0);
+    }
+
+    #[test]
+    fn test_rule_key_fields() {
+        let key = RuleKey {
+            src_ip: u32::from_be_bytes([192, 168, 1, 1]),
+            subnet_mask: 0xFFFFFFFF,
+            protocol: 6,
+            src_port: 8080,
+            dst_port: 443,
+        };
+        assert_eq!(key.src_ip, u32::from_be_bytes([192, 168, 1, 1]));
+        assert_eq!(key.subnet_mask, 0xFFFFFFFF);
+        assert_eq!(key.protocol, 6);
+        assert_eq!(key.src_port, 8080);
+        assert_eq!(key.dst_port, 443);
+    }
+}
+
