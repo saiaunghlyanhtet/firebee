@@ -20,6 +20,13 @@ pub fn render_ui<B: Backend>(f: &mut Frame, app: &mut App) {
         
         let protocol = r.protocol.to_uppercase();
         
+        let direction = match r.direction.to_lowercase().as_str() {
+            "ingress" | "in" => "In",
+            "egress" | "out" => "Out",
+            "both" => "Both",
+            _ => &r.direction,
+        };
+        
         let ports = match (&r.src_port, &r.dst_port) {
             (Some(src), Some(dst)) => format!("{}:{}", src, dst),
             (Some(src), None) => format!("{}:*", src),
@@ -43,7 +50,8 @@ pub fn render_ui<B: Backend>(f: &mut Frame, app: &mut App) {
         Row::new(vec![
             r.name.clone(),
             r.ip.clone(),
-            protocol,
+            protocol.to_string(),
+            direction.to_string(),
             ports,
             action.to_string(),
             stats,
@@ -54,17 +62,18 @@ pub fn render_ui<B: Backend>(f: &mut Frame, app: &mut App) {
     let rules_table = Table::new(
         rules,
         [
-            Constraint::Percentage(12),  // Name
-            Constraint::Percentage(15),  // IP/CIDR
-            Constraint::Percentage(8),   // Protocol
-            Constraint::Percentage(8),   // Ports
-            Constraint::Percentage(8),   // Action
-            Constraint::Percentage(18),  // Stats
+            Constraint::Percentage(11),  // Name
+            Constraint::Percentage(14),  // IP/CIDR
+            Constraint::Percentage(7),   // Protocol
+            Constraint::Percentage(6),   // Direction
+            Constraint::Percentage(7),   // Ports
+            Constraint::Percentage(7),   // Action
+            Constraint::Percentage(17),  // Stats
             Constraint::Percentage(31),  // Description
         ]
     )
         .header(
-            Row::new(vec!["Name", "IP/CIDR", "Protocol", "Ports", "Action", "Stats", "Description"])
+            Row::new(vec!["Name", "IP/CIDR", "Protocol", "Dir", "Ports", "Action", "Stats", "Description"])
                 .style(Style::default().add_modifier(Modifier::BOLD)),
         )
         .block(Block::default().borders(Borders::ALL).title("Rules"));

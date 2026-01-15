@@ -1,13 +1,16 @@
 use anyhow::Result;
-use libbpf_rs::{ObjectBuilder, Link, MapCore};
+use libbpf_rs::{ObjectBuilder, Link, MapCore, TcHook, TcHookBuilder, TC_EGRESS};
 use std::fs;
 use std::path::Path;
-use crate::models::rule::{Action, Rule};
+use std::os::fd::AsFd;
+use crate::models::rule::{Action, Direction, Rule};
 use std::net::Ipv4Addr;
 
 pub struct BpfLoader {
     pub bpf_object: libbpf_rs::Object,
+    pub egress_object: Option<libbpf_rs::Object>,
     pub links: Vec<Link>,
+    pub tc_hook: Option<TcHook>,
     pub interface: String,
 }
 
@@ -34,39 +37,26 @@ impl BpfLoader {
         }
         
         let mut builder = ObjectBuilder::default();
-        
         let mut open_obj = builder.open_file("target/bpf/firebee.bpf.o")?;
         
-        // If we're reusing maps, set them to be reused
-        if reuse_maps {
-            for mut map in open_obj.maps_mut() {
-                let map_name = map.name().to_string_lossy().to_string();
-                let pin_path = format!("{}/{}", FIREBEE_DIR, map_name);
-                if Path::new(&pin_path).exists() {
-                    log::info!("Reusing pinned map: {}", map_name);
-                    if let Err(e) = map.set_pin_path(&pin_path) {
-                        log::warn!("Failed to set pin path for map {}: {}", map_name, e);
-                    }
-                }
+        // Set custom pin path for maps before loading
+        // LIBBPF_PIN_BY_NAME in BPF code will handle auto-pinning/reusing
+        // Skip internal/compiler-generated maps (starting with . or firebee_)
+        for mut map in open_obj.maps_mut() {
+            let map_name = map.name().to_string_lossy().to_string();
+            
+            // Skip compiler-generated maps (.rodata, .bss, .data, etc)
+            if map_name.starts_with('.') || map_name.starts_with("firebee_") {
+                continue;
+            }
+            
+            let pin_path = format!("{}/{}", FIREBEE_DIR, map_name);
+            if let Err(e) = map.set_pin_path(&pin_path) {
+                log::warn!("Failed to set pin path for map {}: {}", map_name, e);
             }
         }
         
         let mut obj = open_obj.load()?;
-        
-        for mut map in obj.maps_mut() {
-            let map_name = map.name().to_string_lossy().to_string();
-            let pin_path = format!("{}/{}", FIREBEE_DIR, map_name);
-            
-            if !reuse_maps {
-                match map.pin(&pin_path) {
-                    Ok(_) => log::info!("Pinned map '{}' to {}", map_name, pin_path),
-                    Err(e) => {
-                        log::warn!("Could not pin map '{}': {} (may already be pinned)", map_name, e);
-                    }
-                }
-            }
-        }
-        
         let mut prog = None;
         for p in obj.progs_mut() {
             if p.name().to_string_lossy() == "xdp_firewall" {
@@ -97,11 +87,113 @@ impl BpfLoader {
         
         let links = vec![link];
         
-        Ok(BpfLoader { 
+        // Load and attach TC-BPF egress program
+        let (egress_obj, tc_hook) = Self::load_egress_program(iface, reuse_maps)?;
+        
+        Ok(BpfLoader {
             bpf_object: obj,
+            egress_object: egress_obj,
             links,
+            tc_hook,
             interface: iface.to_string(),
         })
+    }
+    
+    fn load_egress_program(iface: &str, reuse_maps: bool) -> Result<(Option<libbpf_rs::Object>, Option<TcHook>)> {
+        log::info!("Loading TC-BPF egress program for interface {}", iface);
+        
+        if !fs::metadata("target/bpf/firebee_egress.bpf.o").is_ok() {
+            log::warn!("TC-BPF egress object file not found, skipping egress filtering");
+            log::warn!("Only ingress (incoming) traffic will be filtered");
+            return Ok((None, None));
+        }
+        
+        match Self::try_load_egress(iface, reuse_maps) {
+            Ok(result) => Ok(result),
+            Err(e) => {
+                log::warn!("Failed to load TC-BPF egress program: {}", e);
+                log::warn!("Continuing with ingress-only filtering");
+                Ok((None, None))
+            }
+        }
+    }
+    
+    fn try_load_egress(iface: &str, reuse_maps: bool) -> Result<(Option<libbpf_rs::Object>, Option<TcHook>)> {
+        log::info!("try_load_egress: reuse_maps={}", reuse_maps);
+        
+        let mut builder = ObjectBuilder::default();
+        let mut open_obj = builder.open_file("target/bpf/firebee_egress.bpf.o")?;
+        
+        // Set pin paths for maps before loading
+        // LIBBPF_PIN_BY_NAME in BPF code will handle auto-pinning/reusing
+        // Skip internal/compiler-generated maps (starting with . or firebee_)
+        for mut map in open_obj.maps_mut() {
+            let map_name = map.name().to_string_lossy().to_string();
+            
+            // Skip compiler-generated maps (.rodata, .bss, .data, etc)
+            if map_name.starts_with('.') || map_name.starts_with("firebee_") {
+                continue;
+            }
+            
+            let pin_path = format!("{}/{}", FIREBEE_DIR, map_name);
+            if let Err(e) = map.set_pin_path(&pin_path) {
+                log::warn!("TC egress: Failed to set pin path for map {}: {}", map_name, e);
+            } else {
+                log::info!("TC egress: Set pin path for map {} to {}", map_name, pin_path);
+            }
+        }
+        
+        log::info!("TC egress: Loading BPF object");
+        let obj = open_obj.load()?;
+        log::info!("TC egress: BPF object loaded successfully");
+        
+        // Find the TC egress program and attach it
+        let ifindex = Self::get_ifindex(iface)?;
+        let mut tc_hook: Option<TcHook> = None;
+        
+        for mut prog in obj.progs_mut() {
+            if prog.name().to_string_lossy() == "tc_egress_firewall" {
+                log::info!("Found TC egress program, attaching to interface {}", iface);
+                
+                // Pin the TC program
+                let prog_pin_path = format!("{}/tc_egress_firewall", FIREBEE_DIR);
+                match prog.pin(&prog_pin_path) {
+                    Ok(_) => log::info!("Pinned TC egress program to {}", prog_pin_path),
+                    Err(e) => log::warn!("Could not pin TC egress program: {}", e),
+                }
+                
+                // Attach using libbpf-rs TC hook API
+                let prog_fd = prog.as_fd();
+                let mut hook = TcHookBuilder::new(prog_fd)
+                    .ifindex(ifindex)
+                    .handle(1)
+                    .priority(1)
+                    .hook(TC_EGRESS);
+                
+                // Create clsact qdisc (ignore error if already exists)
+                let _ = hook.create();
+                
+                // Attach the hook
+                match hook.attach() {
+                    Ok(_) => {
+                        log::info!("Successfully attached TC egress program to {}", iface);
+                        tc_hook = Some(hook);
+                    }
+                    Err(e) => {
+                        log::error!("Failed to attach TC egress hook: {}", e);
+                        return Err(anyhow::anyhow!("TC attach failed: {}", e));
+                    }
+                }
+                
+                break;
+            }
+        }
+        
+        if tc_hook.is_none() {
+            log::warn!("TC egress program 'tc_egress_firewall' not found in object");
+        }
+        
+        Ok((Some(obj), tc_hook))
     }
     
     pub fn get_all_rules(&self) -> Result<Vec<Rule>> {
@@ -141,6 +233,7 @@ impl BpfLoader {
                             subnet_mask,
                             action,
                             protocol,
+                            direction: Direction::Ingress, // Default for backward compat
                             src_port: if rule_key.src_port == 0 { None } else { Some(rule_key.src_port) },
                             dst_port: if rule_key.dst_port == 0 { None } else { Some(rule_key.dst_port) },
                         });
@@ -154,10 +247,27 @@ impl BpfLoader {
     }
     
     pub fn unload(iface: &str) -> Result<()> {
-        log::info!("Unloading BPF program and unpinning maps");
+        log::info!("Unloading BPF programs and unpinning maps");
         
-        // Note: XDP program should already be detached by dropping the Link objects
-        // We'll try to detach again just to be safe, in case it wasn't
+        // Detach TC egress hook first
+        log::info!("Detaching TC egress program from interface {}", iface);
+        let tc_detach = std::process::Command::new("tc")
+            .args(["filter", "del", "dev", iface, "egress"])
+            .status();
+            
+        match tc_detach {
+            Ok(status) if status.success() => {
+                log::info!("Successfully detached TC egress program from {}", iface);
+            }
+            Ok(_) => {
+                log::debug!("TC egress program already detached or not present on {}", iface);
+            }
+            Err(e) => {
+                log::warn!("Error running tc command: {}", e);
+            }
+        }
+        
+        // Detach XDP program
         log::info!("Ensuring XDP program is detached from interface {}", iface);
         let detach_status = std::process::Command::new("ip")
             .args(["link", "set", "dev", iface, "xdp", "off"])

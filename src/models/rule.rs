@@ -8,6 +8,32 @@ pub enum Action {
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+pub enum Direction {
+    Ingress,  // Incoming traffic
+    Egress,   // Outgoing traffic
+    Both,     // Both directions
+}
+
+impl Direction {
+    pub fn to_u8(&self) -> u8 {
+        match self {
+            Direction::Ingress => 0,
+            Direction::Egress => 1,
+            Direction::Both => 2,
+        }
+    }
+    
+    pub fn from_u8(val: u8) -> Self {
+        match val {
+            0 => Direction::Ingress,
+            1 => Direction::Egress,
+            2 => Direction::Both,
+            _ => Direction::Ingress, // Default to ingress
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub enum Protocol {
     TCP,
     UDP,
@@ -41,6 +67,7 @@ pub struct Rule {
     pub subnet_mask: Option<u8>,  // CIDR prefix length (e.g., 24 for /24)
     pub action: Action,
     pub protocol: Protocol,
+    pub direction: Direction,
     pub src_port: Option<u16>,
     pub dst_port: Option<u16>,
 }

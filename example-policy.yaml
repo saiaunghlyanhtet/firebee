@@ -3,18 +3,21 @@ rules:
     ip: 192.168.1.100
     action: drop
     protocol: any
+    direction: ingress
     description: Block known malicious IP address
   
   - name: allow_trusted_server
     ip: 10.0.0.5
     action: allow
     protocol: any
+    direction: both
     description: Allow traffic from trusted internal server
   
   - name: block_scanner
     ip: 203.0.113.42
     action: drop
     protocol: any
+    direction: ingress
     description: Block port scanner
   
   - name: block_ssh_from_subnet
@@ -22,6 +25,7 @@ rules:
     action: drop
     protocol: tcp
     dst_port: 22
+    direction: ingress
     description: Block SSH access from entire subnet
   
   - name: allow_dns_queries
@@ -29,6 +33,7 @@ rules:
     action: allow
     protocol: udp
     dst_port: 53
+    direction: both
     description: Allow DNS queries to Google DNS
   
   - name: block_http_from_specific_ip
@@ -36,4 +41,5 @@ rules:
     action: drop
     protocol: tcp
     dst_port: 80
+    direction: ingress
     description: Block HTTP traffic from specific IP
