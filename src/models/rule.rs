@@ -88,3 +88,217 @@ impl Rule {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_direction_to_u8() {
+        assert_eq!(Direction::Ingress.to_u8(), 0);
+        assert_eq!(Direction::Egress.to_u8(), 1);
+        assert_eq!(Direction::Both.to_u8(), 2);
+    }
+
+    #[test]
+    fn test_direction_from_u8() {
+        assert_eq!(Direction::from_u8(0), Direction::Ingress);
+        assert_eq!(Direction::from_u8(1), Direction::Egress);
+        assert_eq!(Direction::from_u8(2), Direction::Both);
+        assert_eq!(Direction::from_u8(99), Direction::Ingress); // Default case
+    }
+
+    #[test]
+    fn test_direction_roundtrip() {
+        let directions = vec![Direction::Ingress, Direction::Egress, Direction::Both];
+        for direction in directions {
+            let u8_val = direction.to_u8();
+            let converted_back = Direction::from_u8(u8_val);
+            assert_eq!(direction, converted_back);
+        }
+    }
+
+    #[test]
+    fn test_protocol_to_u8() {
+        assert_eq!(Protocol::TCP.to_u8(), 6);
+        assert_eq!(Protocol::UDP.to_u8(), 17);
+        assert_eq!(Protocol::ICMP.to_u8(), 1);
+        assert_eq!(Protocol::Any.to_u8(), 255);
+    }
+
+    #[test]
+    fn test_protocol_from_u8() {
+        assert_eq!(Protocol::from_u8(6), Protocol::TCP);
+        assert_eq!(Protocol::from_u8(17), Protocol::UDP);
+        assert_eq!(Protocol::from_u8(1), Protocol::ICMP);
+        assert_eq!(Protocol::from_u8(255), Protocol::Any);
+        assert_eq!(Protocol::from_u8(99), Protocol::Any); // Default case
+    }
+
+    #[test]
+    fn test_protocol_roundtrip() {
+        let protocols = vec![Protocol::TCP, Protocol::UDP, Protocol::ICMP, Protocol::Any];
+        for protocol in protocols {
+            let u8_val = protocol.to_u8();
+            let converted_back = Protocol::from_u8(u8_val);
+            assert_eq!(protocol, converted_back);
+        }
+    }
+
+    #[test]
+    fn test_subnet_mask_exact_match() {
+        let rule = Rule {
+            ip: Ipv4Addr::new(192, 168, 1, 1),
+            subnet_mask: None,
+            action: Action::Allow,
+            protocol: Protocol::TCP,
+            direction: Direction::Ingress,
+            src_port: None,
+            dst_port: None,
+        };
+        assert_eq!(rule.get_subnet_mask_u32(), 0xFFFFFFFF);
+    }
+
+    #[test]
+    fn test_subnet_mask_zero() {
+        let rule = Rule {
+            ip: Ipv4Addr::new(0, 0, 0, 0),
+            subnet_mask: Some(0),
+            action: Action::Allow,
+            protocol: Protocol::TCP,
+            direction: Direction::Ingress,
+            src_port: None,
+            dst_port: None,
+        };
+        assert_eq!(rule.get_subnet_mask_u32(), 0);
+    }
+
+    #[test]
+    fn test_subnet_mask_24() {
+        let rule = Rule {
+            ip: Ipv4Addr::new(192, 168, 1, 0),
+            subnet_mask: Some(24),
+            action: Action::Allow,
+            protocol: Protocol::TCP,
+            direction: Direction::Ingress,
+            src_port: None,
+            dst_port: None,
+        };
+        // /24 = 255.255.255.0 = 0xFFFFFF00
+        assert_eq!(rule.get_subnet_mask_u32(), 0xFFFFFF00);
+    }
+
+    #[test]
+    fn test_subnet_mask_16() {
+        let rule = Rule {
+            ip: Ipv4Addr::new(192, 168, 0, 0),
+            subnet_mask: Some(16),
+            action: Action::Allow,
+            protocol: Protocol::TCP,
+            direction: Direction::Ingress,
+            src_port: None,
+            dst_port: None,
+        };
+        // /16 = 255.255.0.0 = 0xFFFF0000
+        assert_eq!(rule.get_subnet_mask_u32(), 0xFFFF0000);
+    }
+
+    #[test]
+    fn test_subnet_mask_8() {
+        let rule = Rule {
+            ip: Ipv4Addr::new(10, 0, 0, 0),
+            subnet_mask: Some(8),
+            action: Action::Allow,
+            protocol: Protocol::TCP,
+            direction: Direction::Ingress,
+            src_port: None,
+            dst_port: None,
+        };
+        // /8 = 255.0.0.0 = 0xFF000000
+        assert_eq!(rule.get_subnet_mask_u32(), 0xFF000000);
+    }
+
+    #[test]
+    fn test_subnet_mask_32() {
+        let rule = Rule {
+            ip: Ipv4Addr::new(192, 168, 1, 1),
+            subnet_mask: Some(32),
+            action: Action::Allow,
+            protocol: Protocol::TCP,
+            direction: Direction::Ingress,
+            src_port: None,
+            dst_port: None,
+        };
+        assert_eq!(rule.get_subnet_mask_u32(), 0xFFFFFFFF);
+    }
+
+    #[test]
+    fn test_subnet_mask_greater_than_32() {
+        let rule = Rule {
+            ip: Ipv4Addr::new(192, 168, 1, 1),
+            subnet_mask: Some(33),
+            action: Action::Allow,
+            protocol: Protocol::TCP,
+            direction: Direction::Ingress,
+            src_port: None,
+            dst_port: None,
+        };
+        assert_eq!(rule.get_subnet_mask_u32(), 0xFFFFFFFF);
+    }
+
+    #[test]
+    fn test_action_equality() {
+        assert_eq!(Action::Allow, Action::Allow);
+        assert_eq!(Action::Drop, Action::Drop);
+        assert_ne!(Action::Allow, Action::Drop);
+    }
+
+    #[test]
+    fn test_protocol_equality() {
+        assert_eq!(Protocol::TCP, Protocol::TCP);
+        assert_eq!(Protocol::UDP, Protocol::UDP);
+        assert_ne!(Protocol::TCP, Protocol::UDP);
+    }
+
+    #[test]
+    fn test_direction_equality() {
+        assert_eq!(Direction::Ingress, Direction::Ingress);
+        assert_eq!(Direction::Egress, Direction::Egress);
+        assert_eq!(Direction::Both, Direction::Both);
+        assert_ne!(Direction::Ingress, Direction::Egress);
+    }
+
+    #[test]
+    fn test_rule_with_ports() {
+        let rule = Rule {
+            ip: Ipv4Addr::new(192, 168, 1, 1),
+            subnet_mask: None,
+            action: Action::Allow,
+            protocol: Protocol::TCP,
+            direction: Direction::Ingress,
+            src_port: Some(8080),
+            dst_port: Some(443),
+        };
+        assert_eq!(rule.src_port, Some(8080));
+        assert_eq!(rule.dst_port, Some(443));
+    }
+
+    #[test]
+    fn test_rule_clone() {
+        let rule = Rule {
+            ip: Ipv4Addr::new(192, 168, 1, 1),
+            subnet_mask: Some(24),
+            action: Action::Allow,
+            protocol: Protocol::TCP,
+            direction: Direction::Ingress,
+            src_port: None,
+            dst_port: None,
+        };
+        let cloned = rule.clone();
+        assert_eq!(rule.ip, cloned.ip);
+        assert_eq!(rule.subnet_mask, cloned.subnet_mask);
+        assert_eq!(rule.action, cloned.action);
+        assert_eq!(rule.protocol, cloned.protocol);
+        assert_eq!(rule.direction, cloned.direction);
+    }
+}
