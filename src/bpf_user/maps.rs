@@ -1,7 +1,7 @@
-use libbpf_rs::{Map, MapCore};
-use std::net::Ipv4Addr;
 use crate::models::rule::{Action, Direction, Protocol, Rule};
 use crate::policy::PolicyRule;
+use libbpf_rs::{Map, MapCore};
+use std::net::Ipv4Addr;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -19,6 +19,7 @@ pub struct RuleEntry {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct RuleKey {
     pub src_ip: u32,
     pub subnet_mask: u32,
@@ -50,28 +51,29 @@ pub struct RuleMetadata {
 }
 
 impl RuleMetadata {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        ip: Ipv4Addr, 
+        ip: Ipv4Addr,
         subnet_mask: u32,
-        action: u8, 
+        action: u8,
         protocol: u8,
         direction: u8,
         src_port: Option<u16>,
         dst_port: Option<u16>,
-        name: &str, 
-        description: Option<&str>
+        name: &str,
+        description: Option<&str>,
     ) -> Self {
         let mut name_bytes = [0u8; 64];
         let mut desc_bytes = [0u8; 128];
-        
+
         let name_len = name.len().min(63);
         name_bytes[..name_len].copy_from_slice(&name.as_bytes()[..name_len]);
-        
+
         if let Some(desc) = description {
             let desc_len = desc.len().min(127);
             desc_bytes[..desc_len].copy_from_slice(&desc.as_bytes()[..desc_len]);
         }
-        
+
         RuleMetadata {
             ip: u32::from_be_bytes(ip.octets()),
             subnet_mask,
@@ -85,12 +87,12 @@ impl RuleMetadata {
             description: desc_bytes,
         }
     }
-    
+
     pub fn get_name(&self) -> String {
         let end = self.name.iter().position(|&b| b == 0).unwrap_or(64);
         String::from_utf8_lossy(&self.name[..end]).to_string()
     }
-    
+
     pub fn get_description(&self) -> Option<String> {
         let end = self.description.iter().position(|&b| b == 0).unwrap_or(128);
         if end == 0 {
@@ -99,11 +101,11 @@ impl RuleMetadata {
             Some(String::from_utf8_lossy(&self.description[..end]).to_string())
         }
     }
-    
+
     pub fn get_ip(&self) -> Ipv4Addr {
         Ipv4Addr::from(self.ip)
     }
-    
+
     pub fn get_cidr(&self) -> String {
         let ip = self.get_ip();
         if self.subnet_mask == 0xFFFFFFFF {
@@ -115,12 +117,16 @@ impl RuleMetadata {
             format!("{}/{}", ip, prefix_len)
         }
     }
-    
+
     pub fn to_policy_rule(&self) -> PolicyRule {
         PolicyRule {
             name: self.get_name(),
             ip: self.get_cidr(),
-            action: if self.action == 0 { "drop".to_string() } else { "allow".to_string() },
+            action: if self.action == 0 {
+                "drop".to_string()
+            } else {
+                "allow".to_string()
+            },
             description: self.get_description(),
             protocol: match self.protocol {
                 6 => "tcp".to_string(),
@@ -134,8 +140,16 @@ impl RuleMetadata {
                 2 => "both".to_string(),
                 _ => "ingress".to_string(),
             },
-            src_port: if self.src_port == 0 { None } else { Some(self.src_port) },
-            dst_port: if self.dst_port == 0 { None } else { Some(self.dst_port) },
+            src_port: if self.src_port == 0 {
+                None
+            } else {
+                Some(self.src_port)
+            },
+            dst_port: if self.dst_port == 0 {
+                None
+            } else {
+                Some(self.dst_port)
+            },
         }
     }
 }
@@ -153,7 +167,7 @@ impl<'a> BpfMaps<'a> {
         let mut metadata_map = None;
         let mut log_events_map = None;
         let mut stats_map = None;
-        
+
         for map in obj.maps() {
             let name = map.name().to_string_lossy();
             match name.as_ref() {
@@ -164,21 +178,26 @@ impl<'a> BpfMaps<'a> {
                 _ => {}
             }
         }
-        
+
         let rules = rules_map.expect("rules_map not found");
         let metadata = metadata_map.expect("rule_metadata_map not found");
         let log_events = log_events_map.expect("log_events not found");
         let stats = stats_map.expect("rule_stats_map not found");
-        
-        BpfMaps { rules, log_events, metadata, stats }
+
+        BpfMaps {
+            rules,
+            log_events,
+            metadata,
+            stats,
+        }
     }
 
     pub fn update_rule(&self, rule: &Rule, action: u8) -> Result<(), libbpf_rs::Error> {
         log::info!("Updating rule for IP {} with action {}", rule.ip, action);
-        
+
         let ip_u32 = u32::from_be_bytes(rule.ip.octets());
         let subnet_mask = rule.get_subnet_mask_u32();
-        
+
         // Create a rule entry for the array map
         let entry = RuleEntry {
             src_ip: ip_u32,
@@ -191,37 +210,36 @@ impl<'a> BpfMaps<'a> {
             dst_port: rule.dst_port.unwrap_or(0),
             _padding: [0; 2],
         };
-        
+
         let entry_bytes = unsafe {
             std::slice::from_raw_parts(
                 &entry as *const RuleEntry as *const u8,
-                std::mem::size_of::<RuleEntry>()
+                std::mem::size_of::<RuleEntry>(),
             )
         };
-        
+
         // Find first empty slot or update existing rule
         let mut slot_index: Option<u32> = None;
-        
+
         for i in 0..1024u32 {
             let i_bytes = i.to_ne_bytes();
             if let Some(value) = self.rules.lookup(&i_bytes, libbpf_rs::MapFlags::ANY)? {
                 if value.len() >= std::mem::size_of::<RuleEntry>() {
-                    let existing = unsafe {
-                        std::ptr::read(value.as_ptr() as *const RuleEntry)
-                    };
-                    
+                    let existing = unsafe { std::ptr::read(value.as_ptr() as *const RuleEntry) };
+
                     // Check if this is the same rule (update case)
-                    if existing.valid == 1 && 
-                       existing.src_ip == ip_u32 &&
-                       existing.subnet_mask == subnet_mask &&
-                       existing.protocol == rule.protocol.to_u8() &&
-                       existing.direction == rule.direction.to_u8() &&
-                       existing.src_port == rule.src_port.unwrap_or(0) &&
-                       existing.dst_port == rule.dst_port.unwrap_or(0) {
+                    if existing.valid == 1
+                        && existing.src_ip == ip_u32
+                        && existing.subnet_mask == subnet_mask
+                        && existing.protocol == rule.protocol.to_u8()
+                        && existing.direction == rule.direction.to_u8()
+                        && existing.src_port == rule.src_port.unwrap_or(0)
+                        && existing.dst_port == rule.dst_port.unwrap_or(0)
+                    {
                         slot_index = Some(i);
                         break;
                     }
-                    
+
                     // Track first empty slot
                     if existing.valid == 0 && slot_index.is_none() {
                         slot_index = Some(i);
@@ -234,91 +252,96 @@ impl<'a> BpfMaps<'a> {
                 }
             }
         }
-        
+
         let index = slot_index.ok_or_else(|| {
-            libbpf_rs::Error::from(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Rules map is full (max 1024 rules)"
-            ))
+            libbpf_rs::Error::from(std::io::Error::other("Rules map is full (max 1024 rules)"))
         })?;
-        
+
         let index_bytes = index.to_ne_bytes();
-        self.rules.update(&index_bytes, entry_bytes, libbpf_rs::MapFlags::ANY)?;
-            
-        log::info!("Rule updated successfully for IP {} at index {}", rule.ip, index);
+        self.rules
+            .update(&index_bytes, entry_bytes, libbpf_rs::MapFlags::ANY)?;
+
+        log::info!(
+            "Rule updated successfully for IP {} at index {}",
+            rule.ip,
+            index
+        );
         Ok(())
     }
 
     pub fn remove_rule(&self, rule: &Rule) -> Result<(), libbpf_rs::Error> {
         log::info!("Removing rule for IP {}", rule.ip);
-        
+
         let ip_u32 = u32::from_be_bytes(rule.ip.octets());
         let subnet_mask = rule.get_subnet_mask_u32();
-        
+
         // Find and invalidate the matching rule entry
         for i in 0..1024u32 {
             let i_bytes = i.to_ne_bytes();
             if let Some(value) = self.rules.lookup(&i_bytes, libbpf_rs::MapFlags::ANY)? {
                 if value.len() >= std::mem::size_of::<RuleEntry>() {
-                    let existing = unsafe {
-                        std::ptr::read(value.as_ptr() as *const RuleEntry)
-                    };
-                    
-                    if existing.valid == 1 && 
-                       existing.src_ip == ip_u32 &&
-                       existing.subnet_mask == subnet_mask &&
-                       existing.protocol == rule.protocol.to_u8() &&
-                       existing.src_port == rule.src_port.unwrap_or(0) &&
-                       existing.dst_port == rule.dst_port.unwrap_or(0) {
+                    let existing = unsafe { std::ptr::read(value.as_ptr() as *const RuleEntry) };
+
+                    if existing.valid == 1
+                        && existing.src_ip == ip_u32
+                        && existing.subnet_mask == subnet_mask
+                        && existing.protocol == rule.protocol.to_u8()
+                        && existing.src_port == rule.src_port.unwrap_or(0)
+                        && existing.dst_port == rule.dst_port.unwrap_or(0)
+                    {
                         // Mark as invalid
                         let mut entry = existing;
                         entry.valid = 0;
-                        
+
                         let entry_bytes = unsafe {
                             std::slice::from_raw_parts(
                                 &entry as *const RuleEntry as *const u8,
-                                std::mem::size_of::<RuleEntry>()
+                                std::mem::size_of::<RuleEntry>(),
                             )
                         };
-                        
-                        self.rules.update(&i_bytes, entry_bytes, libbpf_rs::MapFlags::ANY)?;
-                        log::info!("Rule removed successfully for IP {} from index {}", rule.ip, i);
+
+                        self.rules
+                            .update(&i_bytes, entry_bytes, libbpf_rs::MapFlags::ANY)?;
+                        log::info!(
+                            "Rule removed successfully for IP {} from index {}",
+                            rule.ip,
+                            i
+                        );
                         return Ok(());
                     }
                 }
             }
         }
-        
+
         Err(libbpf_rs::Error::from(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            format!("Rule not found for IP {}", rule.ip)
+            format!("Rule not found for IP {}", rule.ip),
         )))
     }
 
+    #[allow(dead_code)]
     pub fn get_all_rules(&self) -> Result<Vec<Rule>, libbpf_rs::Error> {
         let mut rules = Vec::new();
-        
+
         // Iterate through array map entries
         for i in 0..1024u32 {
             let i_bytes = i.to_ne_bytes();
             if let Some(value) = self.rules.lookup(&i_bytes, libbpf_rs::MapFlags::ANY)? {
                 if value.len() >= std::mem::size_of::<RuleEntry>() {
-                    let entry = unsafe {
-                        std::ptr::read(value.as_ptr() as *const RuleEntry)
-                    };
-                    
+                    let entry = unsafe { std::ptr::read(value.as_ptr() as *const RuleEntry) };
+
                     // Only include valid entries
                     if entry.valid == 0 {
                         continue;
                     }
-                    
+
                     let ip = Ipv4Addr::from(entry.src_ip);
                     let action = if entry.action == 0 {
                         Action::Drop
                     } else {
                         Action::Allow
                     };
-                    
+
                     let protocol = Protocol::from_u8(entry.protocol);
                     let subnet_mask = if entry.subnet_mask == 0xFFFFFFFF {
                         None
@@ -327,26 +350,40 @@ impl<'a> BpfMaps<'a> {
                     } else {
                         Some(entry.subnet_mask.count_ones() as u8)
                     };
-                    
+
                     rules.push(Rule {
                         ip,
                         subnet_mask,
                         action,
                         protocol,
                         direction: Direction::from_u8(entry.direction),
-                        src_port: if entry.src_port == 0 { None } else { Some(entry.src_port) },
-                        dst_port: if entry.dst_port == 0 { None } else { Some(entry.dst_port) },
+                        src_port: if entry.src_port == 0 {
+                            None
+                        } else {
+                            Some(entry.src_port)
+                        },
+                        dst_port: if entry.dst_port == 0 {
+                            None
+                        } else {
+                            Some(entry.dst_port)
+                        },
                     });
                 }
             }
         }
-        
+
         log::info!("Loaded {} existing rules from eBPF map", rules.len());
         Ok(rules)
     }
-    
+
     // Metadata map operations
-    pub fn add_rule_metadata(&self, name: &str, rule: &Rule, action: u8, description: Option<&str>) -> Result<(), libbpf_rs::Error> {
+    pub fn add_rule_metadata(
+        &self,
+        name: &str,
+        rule: &Rule,
+        action: u8,
+        description: Option<&str>,
+    ) -> Result<(), libbpf_rs::Error> {
         let subnet_mask = rule.get_subnet_mask_u32();
         let metadata = RuleMetadata::new(
             rule.ip,
@@ -362,88 +399,85 @@ impl<'a> BpfMaps<'a> {
         let metadata_bytes = unsafe {
             std::slice::from_raw_parts(
                 &metadata as *const RuleMetadata as *const u8,
-                std::mem::size_of::<RuleMetadata>()
+                std::mem::size_of::<RuleMetadata>(),
             )
         };
-        
+
         let mut key_bytes = [0u8; 64];
         let name_len = name.len().min(63);
         key_bytes[..name_len].copy_from_slice(&name.as_bytes()[..name_len]);
-        
-        self.metadata.update(&key_bytes[..], metadata_bytes, libbpf_rs::MapFlags::ANY)?;
+
+        self.metadata
+            .update(&key_bytes[..], metadata_bytes, libbpf_rs::MapFlags::ANY)?;
         log::info!("Added metadata for rule '{}'", name);
         Ok(())
     }
-    
+
     pub fn get_rule_metadata(&self, name: &str) -> Result<Option<RuleMetadata>, libbpf_rs::Error> {
         let mut key_bytes = [0u8; 64];
         let name_len = name.len().min(63);
         key_bytes[..name_len].copy_from_slice(&name.as_bytes()[..name_len]);
-        
-        if let Some(value) = self.metadata.lookup(&key_bytes[..], libbpf_rs::MapFlags::ANY)? {
+
+        if let Some(value) = self
+            .metadata
+            .lookup(&key_bytes[..], libbpf_rs::MapFlags::ANY)?
+        {
             if value.len() >= std::mem::size_of::<RuleMetadata>() {
-                let metadata = unsafe {
-                    std::ptr::read(value.as_ptr() as *const RuleMetadata)
-                };
+                let metadata = unsafe { std::ptr::read(value.as_ptr() as *const RuleMetadata) };
                 return Ok(Some(metadata));
             }
         }
         Ok(None)
     }
-    
+
     pub fn delete_rule_metadata(&self, name: &str) -> Result<(), libbpf_rs::Error> {
         let mut key_bytes = [0u8; 64];
         let name_len = name.len().min(63);
         key_bytes[..name_len].copy_from_slice(&name.as_bytes()[..name_len]);
-        
+
         self.metadata.delete(&key_bytes[..])?;
         log::info!("Deleted metadata for rule '{}'", name);
         Ok(())
     }
-    
+
     pub fn list_all_metadata(&self) -> Result<Vec<PolicyRule>, libbpf_rs::Error> {
         let mut rules = Vec::new();
-        
+
         for key in self.metadata.keys() {
             if let Some(value) = self.metadata.lookup(&key, libbpf_rs::MapFlags::ANY)? {
                 if value.len() >= std::mem::size_of::<RuleMetadata>() {
-                    let metadata = unsafe {
-                        std::ptr::read(value.as_ptr() as *const RuleMetadata)
-                    };
+                    let metadata = unsafe { std::ptr::read(value.as_ptr() as *const RuleMetadata) };
                     rules.push(metadata.to_policy_rule());
                 }
             }
         }
-        
+
         Ok(rules)
     }
-    
+
     /// Get statistics for a specific rule by index
     pub fn get_rule_stats(&self, index: u32) -> Result<Option<RuleStats>, libbpf_rs::Error> {
         let index_bytes = index.to_ne_bytes();
-        
+
         if let Some(value) = self.stats.lookup(&index_bytes, libbpf_rs::MapFlags::ANY)? {
             if value.len() >= std::mem::size_of::<RuleStats>() {
-                let stats = unsafe {
-                    std::ptr::read(value.as_ptr() as *const RuleStats)
-                };
+                let stats = unsafe { std::ptr::read(value.as_ptr() as *const RuleStats) };
                 return Ok(Some(stats));
             }
         }
         Ok(None)
     }
-    
+
     /// Get statistics for all rules
+    #[allow(dead_code)]
     pub fn get_all_stats(&self) -> Result<Vec<(u32, RuleStats)>, libbpf_rs::Error> {
         let mut stats_list = Vec::new();
-        
+
         for i in 0..1024u32 {
             let i_bytes = i.to_ne_bytes();
             if let Some(value) = self.stats.lookup(&i_bytes, libbpf_rs::MapFlags::ANY)? {
                 if value.len() >= std::mem::size_of::<RuleStats>() {
-                    let stats = unsafe {
-                        std::ptr::read(value.as_ptr() as *const RuleStats)
-                    };
+                    let stats = unsafe { std::ptr::read(value.as_ptr() as *const RuleStats) };
                     // Only include non-zero stats
                     if stats.packets > 0 || stats.bytes > 0 {
                         stats_list.push((i, stats));
@@ -451,10 +485,10 @@ impl<'a> BpfMaps<'a> {
                 }
             }
         }
-        
+
         Ok(stats_list)
     }
-    
+
     /// Reset statistics for a specific rule
     pub fn reset_rule_stats(&self, index: u32) -> Result<(), libbpf_rs::Error> {
         let index_bytes = index.to_ne_bytes();
@@ -462,18 +496,19 @@ impl<'a> BpfMaps<'a> {
             packets: 0,
             bytes: 0,
         };
-        
+
         let stats_bytes = unsafe {
             std::slice::from_raw_parts(
                 &zero_stats as *const RuleStats as *const u8,
-                std::mem::size_of::<RuleStats>()
+                std::mem::size_of::<RuleStats>(),
             )
         };
-        
-        self.stats.update(&index_bytes, stats_bytes, libbpf_rs::MapFlags::ANY)?;
+
+        self.stats
+            .update(&index_bytes, stats_bytes, libbpf_rs::MapFlags::ANY)?;
         Ok(())
     }
-    
+
     /// Reset all statistics
     pub fn reset_all_stats(&self) -> Result<(), libbpf_rs::Error> {
         for i in 0..1024u32 {
@@ -481,43 +516,53 @@ impl<'a> BpfMaps<'a> {
         }
         Ok(())
     }
-    
+
     /// Get statistics mapped to rule names
     /// Returns a HashMap of rule_name -> (packets, bytes)
-    pub fn get_stats_by_name(&self) -> Result<std::collections::HashMap<String, (u64, u64)>, libbpf_rs::Error> {
+    pub fn get_stats_by_name(
+        &self,
+    ) -> Result<std::collections::HashMap<String, (u64, u64)>, libbpf_rs::Error> {
         use std::collections::HashMap;
-        
+
         let mut stats_map = HashMap::new();
-        
+
         // First, build a map of rule attributes to index
         let mut rule_index_map: HashMap<(u32, u32, u8, u16, u16), u32> = HashMap::new();
-        
+
         for i in 0..1024u32 {
             let i_bytes = i.to_ne_bytes();
             if let Some(value) = self.rules.lookup(&i_bytes, libbpf_rs::MapFlags::ANY)? {
                 if value.len() >= std::mem::size_of::<RuleEntry>() {
-                    let entry = unsafe {
-                        std::ptr::read(value.as_ptr() as *const RuleEntry)
-                    };
-                    
+                    let entry = unsafe { std::ptr::read(value.as_ptr() as *const RuleEntry) };
+
                     if entry.valid == 1 {
-                        let key = (entry.src_ip, entry.subnet_mask, entry.protocol, entry.src_port, entry.dst_port);
+                        let key = (
+                            entry.src_ip,
+                            entry.subnet_mask,
+                            entry.protocol,
+                            entry.src_port,
+                            entry.dst_port,
+                        );
                         rule_index_map.insert(key, i);
                     }
                 }
             }
         }
-        
+
         // Now iterate through metadata and match with stats
         for key in self.metadata.keys() {
             if let Some(value) = self.metadata.lookup(&key, libbpf_rs::MapFlags::ANY)? {
                 if value.len() >= std::mem::size_of::<RuleMetadata>() {
-                    let metadata = unsafe {
-                        std::ptr::read(value.as_ptr() as *const RuleMetadata)
-                    };
-                    
-                    let rule_key = (metadata.ip, metadata.subnet_mask, metadata.protocol, metadata.src_port, metadata.dst_port);
-                    
+                    let metadata = unsafe { std::ptr::read(value.as_ptr() as *const RuleMetadata) };
+
+                    let rule_key = (
+                        metadata.ip,
+                        metadata.subnet_mask,
+                        metadata.protocol,
+                        metadata.src_port,
+                        metadata.dst_port,
+                    );
+
                     if let Some(&index) = rule_index_map.get(&rule_key) {
                         if let Ok(Some(stats)) = self.get_rule_stats(index) {
                             let name = metadata.get_name();
@@ -527,7 +572,7 @@ impl<'a> BpfMaps<'a> {
                 }
             }
         }
-        
+
         Ok(stats_map)
     }
 }
@@ -549,7 +594,7 @@ mod tests {
             "test_rule",
             Some("Test description"),
         );
-        
+
         assert_eq!(metadata.action, 1);
         assert_eq!(metadata.protocol, 6);
         assert_eq!(metadata.direction, 0);
@@ -570,7 +615,7 @@ mod tests {
             "my_firewall_rule",
             None,
         );
-        
+
         assert_eq!(metadata.get_name(), "my_firewall_rule");
     }
 
@@ -588,7 +633,7 @@ mod tests {
             &long_name,
             None,
         );
-        
+
         let result_name = metadata.get_name();
         assert!(result_name.len() <= 63);
         assert_eq!(result_name, "a".repeat(63));
@@ -607,8 +652,11 @@ mod tests {
             "test",
             Some("Block malicious traffic"),
         );
-        
-        assert_eq!(metadata.get_description(), Some("Block malicious traffic".to_string()));
+
+        assert_eq!(
+            metadata.get_description(),
+            Some("Block malicious traffic".to_string())
+        );
     }
 
     #[test]
@@ -624,7 +672,7 @@ mod tests {
             "test",
             None,
         );
-        
+
         assert_eq!(metadata.get_description(), None);
     }
 
@@ -642,7 +690,7 @@ mod tests {
             "test",
             Some(&long_desc),
         );
-        
+
         let result_desc = metadata.get_description().unwrap();
         assert!(result_desc.len() <= 127);
         assert_eq!(result_desc, "b".repeat(127));
@@ -661,7 +709,7 @@ mod tests {
             "test",
             None,
         );
-        
+
         assert_eq!(metadata.get_ip(), Ipv4Addr::new(10, 0, 0, 1));
     }
 
@@ -678,7 +726,7 @@ mod tests {
             "test",
             None,
         );
-        
+
         assert_eq!(metadata.get_cidr(), "192.168.1.1");
     }
 
@@ -695,7 +743,7 @@ mod tests {
             "test",
             None,
         );
-        
+
         assert_eq!(metadata.get_cidr(), "192.168.1.0/24");
     }
 
@@ -712,7 +760,7 @@ mod tests {
             "test",
             None,
         );
-        
+
         assert_eq!(metadata.get_cidr(), "0.0.0.0/0");
     }
 
@@ -729,7 +777,7 @@ mod tests {
             "allow_https",
             Some("Allow HTTPS traffic"),
         );
-        
+
         let policy = metadata.to_policy_rule();
         assert_eq!(policy.name, "allow_https");
         assert_eq!(policy.ip, "192.168.1.1");
@@ -746,15 +794,15 @@ mod tests {
         let metadata = RuleMetadata::new(
             Ipv4Addr::new(10, 0, 0, 1),
             0xFFFFFFFF,
-            0, // drop
+            0,  // drop
             17, // udp
-            1, // egress
+            1,  // egress
             None,
             None,
             "drop_udp",
             None,
         );
-        
+
         let policy = metadata.to_policy_rule();
         assert_eq!(policy.action, "drop");
         assert_eq!(policy.protocol, "udp");
@@ -773,7 +821,7 @@ mod tests {
             (255, "any"),
             (99, "any"), // unknown defaults to any
         ];
-        
+
         for (protocol_u8, expected) in test_cases {
             let metadata = RuleMetadata::new(
                 Ipv4Addr::new(192, 168, 1, 1),
@@ -786,7 +834,7 @@ mod tests {
                 "test",
                 None,
             );
-            
+
             let policy = metadata.to_policy_rule();
             assert_eq!(policy.protocol, expected);
         }
@@ -800,7 +848,7 @@ mod tests {
             (2, "both"),
             (99, "ingress"), // unknown defaults to ingress
         ];
-        
+
         for (direction_u8, expected) in test_cases {
             let metadata = RuleMetadata::new(
                 Ipv4Addr::new(192, 168, 1, 1),
@@ -813,7 +861,7 @@ mod tests {
                 "test",
                 None,
             );
-            
+
             let policy = metadata.to_policy_rule();
             assert_eq!(policy.direction, expected);
         }
@@ -832,7 +880,7 @@ mod tests {
             "test",
             None,
         );
-        
+
         let policy = metadata.to_policy_rule();
         assert_eq!(policy.src_port, None);
         assert_eq!(policy.dst_port, None);
@@ -884,4 +932,3 @@ mod tests {
         assert_eq!(key.dst_port, 443);
     }
 }
-

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use tokio::sync::mpsc;
 
+#[allow(dead_code)]
 pub enum Command {
     AddRule(Rule),
     RemoveRule(Ipv4Addr),
@@ -23,7 +24,11 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cmd_tx: mpsc::Sender<Command>, log_rx: mpsc::Receiver<String>, initial_rules: Vec<PolicyRule>) -> Self {
+    pub fn new(
+        cmd_tx: mpsc::Sender<Command>,
+        log_rx: mpsc::Receiver<String>,
+        initial_rules: Vec<PolicyRule>,
+    ) -> Self {
         Self {
             rules: initial_rules,
             logs: vec![],
@@ -36,7 +41,7 @@ impl App {
             log_rx,
         }
     }
-    
+
     pub fn update_stats(&mut self, stats: HashMap<String, (u64, u64)>) {
         self.rule_stats = stats;
     }
@@ -82,6 +87,7 @@ impl App {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn remove_rule(&mut self, ip: Ipv4Addr) -> bool {
         self.rules.retain(|r| r.ip != ip.to_string());
         self.cmd_tx.send(Command::RemoveRule(ip)).await.is_ok()

@@ -15,9 +15,9 @@ fn main() {
     let manifest_dir = PathBuf::from(
         env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set in build script"),
     );
-    
+
     let bpf_dir = manifest_dir.join("src").join("bpf");
-    
+
     let out_ingress = bpf_dir.join("firebee.skel.rs");
     let out_egress = bpf_dir.join("firebee_egress.skel.rs");
 
@@ -25,10 +25,7 @@ fn main() {
         .expect("CARGO_CFG_TARGET_ARCH must be set in build script");
 
     let vmlinux_path = vmlinux::include_path_root().join(&arch);
-    let clang_args = vec![
-        OsStr::new("-I"),
-        vmlinux_path.as_os_str(),
-    ];
+    let clang_args = vec![OsStr::new("-I"), vmlinux_path.as_os_str()];
 
     // Build XDP ingress program
     SkeletonBuilder::new()
@@ -45,7 +42,7 @@ fn main() {
         .build_and_generate(&out_egress)
         .unwrap();
     println!("cargo:rerun-if-changed={SRC_EGRESS}");
-    
+
     // Rerun if common headers change
     println!("cargo:rerun-if-changed=src/bpf/firebee_common.h");
     println!("cargo:rerun-if-changed=src/bpf/firebee_helpers.h");

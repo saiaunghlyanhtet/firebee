@@ -1,6 +1,6 @@
-use crossterm::event::{Event, KeyCode};
-use crate::ui::app::{App};
 use crate::models::rule::Action;
+use crate::ui::app::App;
+use crossterm::event::{Event, KeyCode};
 
 pub async fn handle_events(app: &mut App) -> anyhow::Result<bool> {
     if crossterm::event::poll(std::time::Duration::from_millis(50))? {
