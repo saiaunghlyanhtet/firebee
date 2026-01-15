@@ -1,10 +1,11 @@
-use crate::ui::app::Command;
 use crate::bpf_user::{loader::BpfLoader, maps::BpfMaps};
 use crate::models::rule::Rule;
-use tokio::sync::mpsc;
-use libbpf_rs::{RingBufferBuilder, Link};
+use crate::ui::app::Command;
+use libbpf_rs::{Link, RingBufferBuilder};
 use std::net::Ipv4Addr;
+use tokio::sync::mpsc;
 
+#[allow(dead_code)]
 pub struct BpfHandler {
     bpf_object: Option<Box<libbpf_rs::Object>>,
     maps: Option<BpfMaps<'static>>,
@@ -15,7 +16,12 @@ pub struct BpfHandler {
 }
 
 impl BpfHandler {
-    pub fn new(loader: BpfLoader, cmd_rx: mpsc::Receiver<Command>, log_tx: mpsc::Sender<String>) -> Self {
+    #[allow(dead_code)]
+    pub fn new(
+        loader: BpfLoader,
+        cmd_rx: mpsc::Receiver<Command>,
+        log_tx: mpsc::Sender<String>,
+    ) -> Self {
         let bpf_object = Box::new(loader.bpf_object);
         let interface = loader.interface;
         let links = loader.links;
@@ -38,6 +44,7 @@ impl BpfHandler {
         }
     }
 
+    #[allow(dead_code)]
     pub fn get_all_rules(&self) -> Result<Vec<Rule>, libbpf_rs::Error> {
         if let Some(maps) = &self.maps {
             maps.get_all_rules()
@@ -46,6 +53,7 @@ impl BpfHandler {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn run(&mut self) {
         let mut rb_builder = RingBufferBuilder::new();
         let log_tx = self.log_tx.clone();
@@ -99,7 +107,7 @@ impl BpfHandler {
                             // Try to find the rule in metadata by searching for matching IP
                             // This ensures we get the correct protocol, ports, and subnet mask
                             let mut found = false;
-                            
+
                             // Iterate through metadata to find matching IP
                             match maps.list_all_metadata() {
                                 Ok(policy_rules) => {
@@ -109,11 +117,19 @@ impl BpfHandler {
                                             if rule.ip == ip {
                                                 // Found the rule with matching IP, now delete it
                                                 if let Err(e) = maps.remove_rule(&rule) {
-                                                    log::error!("Failed to remove rule from rules map: {}", e);
+                                                    log::error!(
+                                                        "Failed to remove rule from rules map: {}",
+                                                        e
+                                                    );
                                                 } else {
                                                     // Also delete the metadata
-                                                    if let Err(e) = maps.delete_rule_metadata(&policy_rule.name) {
-                                                        log::error!("Failed to delete rule metadata: {}", e);
+                                                    if let Err(e) =
+                                                        maps.delete_rule_metadata(&policy_rule.name)
+                                                    {
+                                                        log::error!(
+                                                            "Failed to delete rule metadata: {}",
+                                                            e
+                                                        );
                                                     } else {
                                                         log::info!("Successfully removed rule '{}' for IP {}", policy_rule.name, ip);
                                                         found = true;
@@ -123,7 +139,7 @@ impl BpfHandler {
                                             }
                                         }
                                     }
-                                    
+
                                     if !found {
                                         log::warn!("No rule found with IP {} in metadata", ip);
                                     }
@@ -159,9 +175,7 @@ impl BpfHandler {
         if should_unload {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-            if let Some(maps) = self.maps.take() {
-                drop(maps);
-            }
+            if let Some(_maps) = self.maps.take() {}
             if let Some(obj) = self.bpf_object.take() {
                 drop(obj);
             }
@@ -176,9 +190,7 @@ impl BpfHandler {
 impl Drop for BpfHandler {
     fn drop(&mut self) {
         // Ensure the maps drop before the underlying object to respect lifetimes.
-        if let Some(maps) = self.maps.take() {
-            drop(maps);
-        }
+        if let Some(_maps) = self.maps.take() {}
         if let Some(obj) = self.bpf_object.take() {
             drop(obj);
         }

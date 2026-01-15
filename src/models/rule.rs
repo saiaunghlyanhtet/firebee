@@ -9,9 +9,9 @@ pub enum Action {
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub enum Direction {
-    Ingress,  // Incoming traffic
-    Egress,   // Outgoing traffic
-    Both,     // Both directions
+    Ingress, // Incoming traffic
+    Egress,  // Outgoing traffic
+    Both,    // Both directions
 }
 
 impl Direction {
@@ -22,7 +22,7 @@ impl Direction {
             Direction::Both => 2,
         }
     }
-    
+
     pub fn from_u8(val: u8) -> Self {
         match val {
             0 => Direction::Ingress,
@@ -34,6 +34,7 @@ impl Direction {
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum Protocol {
     TCP,
     UDP,
@@ -50,7 +51,8 @@ impl Protocol {
             Protocol::Any => 255,
         }
     }
-    
+
+    #[allow(dead_code)]
     pub fn from_u8(val: u8) -> Self {
         match val {
             6 => Protocol::TCP,
@@ -64,7 +66,7 @@ impl Protocol {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Rule {
     pub ip: Ipv4Addr,
-    pub subnet_mask: Option<u8>,  // CIDR prefix length (e.g., 24 for /24)
+    pub subnet_mask: Option<u8>, // CIDR prefix length (e.g., 24 for /24)
     pub action: Action,
     pub protocol: Protocol,
     pub direction: Direction,

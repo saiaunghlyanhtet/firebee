@@ -1,14 +1,17 @@
 use crate::ui::app::App;
 use ratatui::{prelude::*, text::ToText, widgets::*};
 
-pub fn render_ui<B: Backend>(f: &mut Frame, app: &mut App) {
+pub fn render_ui(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(50),
-            Constraint::Percentage(45),
-            Constraint::Length(3),
-        ].as_ref())
+        .constraints(
+            [
+                Constraint::Percentage(50),
+                Constraint::Percentage(45),
+                Constraint::Length(3),
+            ]
+            .as_ref(),
+        )
         .split(f.area());
 
     let rules = app.rules.iter().map(|r| {
@@ -17,36 +20,38 @@ pub fn render_ui<B: Backend>(f: &mut Frame, app: &mut App) {
             "drop" => "Drop",
             _ => &r.action,
         };
-        
+
         let protocol = r.protocol.to_uppercase();
-        
+
         let direction = match r.direction.to_lowercase().as_str() {
             "ingress" | "in" => "In",
             "egress" | "out" => "Out",
             "both" => "Both",
             _ => &r.direction,
         };
-        
+
         let ports = match (&r.src_port, &r.dst_port) {
             (Some(src), Some(dst)) => format!("{}:{}", src, dst),
             (Some(src), None) => format!("{}:*", src),
             (None, Some(dst)) => format!("*:{}", dst),
             (None, None) => "*".to_string(),
         };
-        
+
         let description = r.description.as_deref().unwrap_or("-");
-        
+
         // Format stats - get from app.rule_stats if available
-        let (packets, bytes) = app.rule_stats.get(&r.name)
+        let (packets, bytes) = app
+            .rule_stats
+            .get(&r.name)
             .map(|(p, b)| (*p, *b))
             .unwrap_or((0, 0));
-        
+
         let stats = if packets > 0 {
             format!("{} pkts / {}", format_number(packets), format_bytes(bytes))
         } else {
             "-".to_string()
         };
-        
+
         Row::new(vec![
             r.name.clone(),
             r.ip.clone(),
@@ -62,21 +67,30 @@ pub fn render_ui<B: Backend>(f: &mut Frame, app: &mut App) {
     let rules_table = Table::new(
         rules,
         [
-            Constraint::Percentage(11),  // Name
-            Constraint::Percentage(14),  // IP/CIDR
-            Constraint::Percentage(7),   // Protocol
-            Constraint::Percentage(6),   // Direction
-            Constraint::Percentage(7),   // Ports
-            Constraint::Percentage(7),   // Action
-            Constraint::Percentage(17),  // Stats
-            Constraint::Percentage(31),  // Description
-        ]
+            Constraint::Percentage(11), // Name
+            Constraint::Percentage(14), // IP/CIDR
+            Constraint::Percentage(7),  // Protocol
+            Constraint::Percentage(6),  // Direction
+            Constraint::Percentage(7),  // Ports
+            Constraint::Percentage(7),  // Action
+            Constraint::Percentage(17), // Stats
+            Constraint::Percentage(31), // Description
+        ],
     )
-        .header(
-            Row::new(vec!["Name", "IP/CIDR", "Protocol", "Dir", "Ports", "Action", "Stats", "Description"])
-                .style(Style::default().add_modifier(Modifier::BOLD)),
-        )
-        .block(Block::default().borders(Borders::ALL).title("Rules"));
+    .header(
+        Row::new(vec![
+            "Name",
+            "IP/CIDR",
+            "Protocol",
+            "Dir",
+            "Ports",
+            "Action",
+            "Stats",
+            "Description",
+        ])
+        .style(Style::default().add_modifier(Modifier::BOLD)),
+    )
+    .block(Block::default().borders(Borders::ALL).title("Rules"));
 
     f.render_widget(rules_table, chunks[0]);
 
@@ -107,14 +121,14 @@ pub fn render_ui<B: Backend>(f: &mut Frame, app: &mut App) {
 
     // Unload confirmation dialog
     if app.confirm_unload {
-        let warning_text = vec![
+        let warning_text = [
             "WARNING: This will unload the XDP firewall program!",
             "",
             "Are you sure you want to continue?",
             "",
             "Press Y to confirm, N or ESC to cancel",
         ];
-        
+
         let popup = Paragraph::new(warning_text.join("\n"))
             .block(
                 Block::default()
@@ -124,7 +138,7 @@ pub fn render_ui<B: Backend>(f: &mut Frame, app: &mut App) {
             )
             .alignment(ratatui::layout::Alignment::Center)
             .wrap(Wrap { trim: true });
-        
+
         let area = centered_rect(60, 40, f.area());
         f.render_widget(Clear, area);
         f.render_widget(popup, area);

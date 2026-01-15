@@ -1,18 +1,18 @@
+use crate::bpf_user::{loader::BpfLoader, maps::BpfMaps};
+use crate::policy::{parse_policy_file, validate_policy};
+use crate::state::RulesState;
+use crate::ui::{app::App, events::handle_events, widgets::render_ui};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{prelude::*};
+use once_cell::sync::OnceCell;
+use ratatui::prelude::*;
 use std::io;
 use std::path::PathBuf;
-use once_cell::sync::OnceCell;
 use tokio::sync::mpsc;
-use crate::bpf_user::{loader::BpfLoader, maps::BpfMaps};
-use crate::ui::{app::App, events::handle_events, widgets::render_ui};
-use crate::policy::{parse_policy_file, validate_policy};
-use crate::state::RulesState;
 
 mod bpf_user;
 mod models;
@@ -44,7 +44,7 @@ enum Commands {
     Run {
         /// Network interface to attach the XDP program to
         interface: String,
-        
+
         /// Optional policy file to load rules from
         #[arg(short, long)]
         policy: Option<PathBuf>,
@@ -56,11 +56,11 @@ enum Commands {
         /// Network interface (must already have firebee running or use with --attach)
         #[arg(short, long)]
         interface: Option<String>,
-        
+
         /// Policy file containing rules to add
         #[arg(short, long)]
         policy: PathBuf,
-        
+
         /// Attach to interface if not already attached
         #[arg(short, long)]
         attach: bool,
@@ -88,7 +88,7 @@ enum GetCommands {
     Rule {
         /// Name of the rule to retrieve (optional - shows all if omitted)
         name: Option<String>,
-        
+
         /// Output format
         #[arg(short, long, value_enum, default_value = "yaml")]
         output: OutputFormat,
@@ -129,33 +129,31 @@ async fn main() -> Result<()> {
         Commands::Ui => {
             run_tui().await?;
         }
-        Commands::Add { interface, policy, attach } => {
+        Commands::Add {
+            interface,
+            policy,
+            attach,
+        } => {
             add_rules_from_policy(interface, policy, attach).await?;
         }
-        Commands::Get { command } => {
-            match command {
-                GetCommands::Rule { name, output } => {
-                    get_rule(name.as_deref(), output)?;
-                }
+        Commands::Get { command } => match command {
+            GetCommands::Rule { name, output } => {
+                get_rule(name.as_deref(), output)?;
             }
-        }
-        Commands::Delete { command } => {
-            match command {
-                DeleteCommands::Rule { name } => {
-                    delete_rule(&name).await?;
-                }
+        },
+        Commands::Delete { command } => match command {
+            DeleteCommands::Rule { name } => {
+                delete_rule(&name).await?;
             }
-        }
-        Commands::Stats { command } => {
-            match command {
-                StatsCommands::Show { output } => {
-                    show_stats(output)?;
-                }
-                StatsCommands::Reset => {
-                    reset_stats()?;
-                }
+        },
+        Commands::Stats { command } => match command {
+            StatsCommands::Show { output } => {
+                show_stats(output)?;
             }
-        }
+            StatsCommands::Reset => {
+                reset_stats()?;
+            }
+        },
     }
 
     Ok(())
@@ -165,62 +163,64 @@ async fn run_firewall(interface: &str, policy: Option<PathBuf>) -> Result<()> {
     println!("Attaching XDP firewall to interface: {}", interface);
     let _loader = BpfLoader::new(interface)?;
     println!("✓ XDP program attached to {}", interface);
-    
+
     // Load rules from policy file if provided
     if let Some(policy_path) = policy {
-        println!("\nLoading rules from policy file: {}", policy_path.display());
-        
+        println!(
+            "\nLoading rules from policy file: {}",
+            policy_path.display()
+        );
+
         let policy = parse_policy_file(&policy_path)?;
         validate_policy(&policy)?;
         println!("Policy validation passed!");
-        
+
         let maps = open_pinned_maps()?;
-        
+
         for policy_rule in &policy.rules {
             RulesState::add_rule(&maps, policy_rule)?;
-            
+
             let rule = policy_rule.to_rule()?;
             let action = match rule.action {
                 crate::models::rule::Action::Allow => "ALLOW",
                 crate::models::rule::Action::Drop => "DROP",
             };
-            
-            println!("✓ Added rule '{}': {} -> {}", 
-                policy_rule.name, 
-                rule.ip,
-                action
+
+            println!(
+                "✓ Added rule '{}': {} -> {}",
+                policy_rule.name, rule.ip, action
             );
         }
-        
+
         println!("\nSuccessfully loaded {} rules!", policy.rules.len());
     }
-    
+
     println!("\nXDP firewall is running. Use 'firebee ui' to view the TUI.");
     println!("The program will stay attached. Run 'firebee add' to add more rules.");
-    
+
     // Keep the loader alive to prevent XDP detachment
     std::mem::forget(_loader);
-    
+
     Ok(())
 }
 
 async fn run_tui() -> Result<()> {
     let (tx_cmd, _rx_cmd) = mpsc::channel(32); // Commands: UI -> BPF
     let (tx_log, rx_log) = mpsc::channel(32); // Logs: BPF -> UI
-    
+
     // Load existing rules from BPF maps
     let maps = open_pinned_maps()?;
     let existing_rules = RulesState::list_rules(&maps).unwrap_or_else(|e| {
         log::warn!("Failed to load existing rules: {}", e);
         Vec::new()
     });
-    
+
     // Start event reader thread to consume ring buffer events
     let tx_log_clone = tx_log.clone();
     let event_handle = std::thread::spawn(move || {
         use libbpf_rs::RingBufferBuilder;
         use std::net::Ipv4Addr;
-        
+
         // Open maps inside the thread since they're not Send
         let maps = match open_pinned_maps() {
             Ok(m) => m,
@@ -229,7 +229,7 @@ async fn run_tui() -> Result<()> {
                 return;
             }
         };
-        
+
         let mut rb_builder = RingBufferBuilder::new();
         let log_tx = tx_log_clone;
 
@@ -268,14 +268,14 @@ async fn run_tui() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(tx_cmd, rx_log, existing_rules);
-    
+
     // Update stats periodically
     let mut stats_interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
 
     loop {
         // Update app logs
         app.update().await;
-        
+
         // Periodically update statistics
         tokio::select! {
             _ = stats_interval.tick() => {
@@ -286,17 +286,17 @@ async fn run_tui() -> Result<()> {
                 }
             }
         }
-        
-        terminal.draw(|f| render_ui::<CrosstermBackend<io::Stdout>>(f, &mut app))?;
+
+        terminal.draw(|f| render_ui(f, &mut app))?;
         if handle_events(&mut app).await? {
-            break; 
+            break;
         }
     }
 
     // Cleanup
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    
+
     // Stop the event reader thread
     drop(event_handle);
 
@@ -309,26 +309,25 @@ async fn add_rules_from_policy(
     attach: bool,
 ) -> Result<()> {
     println!("Reading policy file: {}", policy_path.display());
-    
+
     // Parse and validate the policy file
     let policy = parse_policy_file(&policy_path)?;
-    
+
     validate_policy(&policy)?;
     println!("Policy validation passed!");
-    
+
     println!("Found {} rules to add", policy.rules.len());
-    
+
     // If attach flag is set, load the BPF program
     let _loader = if attach {
-        let iface = interface.ok_or_else(|| {
-            anyhow::anyhow!("--interface required when using --attach")
-        })?;
+        let iface =
+            interface.ok_or_else(|| anyhow::anyhow!("--interface required when using --attach"))?;
         println!("Attaching to interface: {}", iface);
         Some(BpfLoader::new(&iface)?)
     } else {
         None
     };
-    
+
     // Access the BPF maps (either newly created or pinned)
     let maps = if _loader.is_some() {
         // If we just attached, the maps are newly created and pinned
@@ -338,26 +337,25 @@ async fn add_rules_from_policy(
         // If not attaching, try to open existing pinned maps
         open_pinned_maps()?
     };
-    
+
     for policy_rule in &policy.rules {
         RulesState::add_rule(&maps, policy_rule)?;
-        
+
         let rule = policy_rule.to_rule()?;
         let action = match rule.action {
             crate::models::rule::Action::Allow => "ALLOW",
             crate::models::rule::Action::Drop => "DROP",
         };
-        
-        println!("✓ Added rule '{}': {} -> {}", 
-            policy_rule.name, 
-            rule.ip,
-            action
+
+        println!(
+            "✓ Added rule '{}': {} -> {}",
+            policy_rule.name, rule.ip, action
         );
     }
-    
+
     println!("\nSuccessfully added {} rules!", policy.rules.len());
     println!("Rules are now active in the eBPF firewall.");
-    
+
     // Keep the loader alive if we attached
     // This prevents the XDP program from being detached
     if _loader.is_some() {
@@ -365,17 +363,17 @@ async fn add_rules_from_policy(
         println!("The program will stay loaded even after this command exits.");
         std::mem::forget(_loader); // Intentionally leak to keep XDP attached
     }
-    
+
     Ok(())
 }
 
 fn open_pinned_maps() -> Result<BpfMaps<'static>> {
     use std::path::Path;
-    
+
     // Check if maps are pinned
     const FIREBEE_DIR: &str = "/sys/fs/bpf/firebee";
     let rules_map_path = format!("{}/rules_map", FIREBEE_DIR);
-    
+
     if !Path::new(&rules_map_path).exists() {
         anyhow::bail!(
             "No active firebee instance found. Maps are not pinned at {}.\n\
@@ -384,14 +382,15 @@ fn open_pinned_maps() -> Result<BpfMaps<'static>> {
             FIREBEE_DIR
         );
     }
-    
+
     // Get or initialize the singleton BPF object
     let obj = PINNED_BPF_OBJ.get_or_try_init(|| -> Result<libbpf_rs::Object> {
         // Open BPF object and reuse pinned maps
         let mut builder = libbpf_rs::ObjectBuilder::default();
-        let mut open_obj = builder.open_file("target/bpf/firebee.bpf.o")
+        let mut open_obj = builder
+            .open_file("target/bpf/firebee.bpf.o")
             .context("Failed to open BPF object file")?;
-        
+
         // Set all maps to reuse pinned paths instead of creating new ones
         for mut map in open_obj.maps_mut() {
             let map_name = map.name().to_string_lossy().to_string();
@@ -401,83 +400,76 @@ fn open_pinned_maps() -> Result<BpfMaps<'static>> {
                     .with_context(|| format!("Failed to reuse pinned map {}", map_name))?;
             }
         }
-        
-        open_obj.load()
-            .context("Failed to load BPF object")
+
+        open_obj.load().context("Failed to load BPF object")
     })?;
-    
+
     let maps = BpfMaps::new(obj);
-    
+
     Ok(maps)
 }
 
 fn get_rule(name: Option<&str>, format: OutputFormat) -> Result<()> {
     // Access pinned BPF maps
     let maps = open_pinned_maps()?;
-    
+
     match name {
         Some(rule_name) => {
             let rule = RulesState::get_rule(&maps, rule_name)?
                 .ok_or_else(|| anyhow::anyhow!("Rule '{}' not found", rule_name))?;
-            
+
             let output = match format {
                 OutputFormat::Yaml => {
-                    serde_yaml::to_string(&rule)
-                        .context("Failed to serialize rule to YAML")?
+                    serde_yaml::to_string(&rule).context("Failed to serialize rule to YAML")?
                 }
-                OutputFormat::Json => {
-                    serde_json::to_string_pretty(&rule)
-                        .context("Failed to serialize rule to JSON")?
-                }
+                OutputFormat::Json => serde_json::to_string_pretty(&rule)
+                    .context("Failed to serialize rule to JSON")?,
             };
-            
+
             println!("{}", output);
         }
         None => {
             // Get all rules
             let rules = RulesState::list_rules(&maps)?;
-            
+
             if rules.is_empty() {
                 println!("No rules found");
                 return Ok(());
             }
-            
+
             let output = match format {
                 OutputFormat::Yaml => {
-                    serde_yaml::to_string(&rules)
-                        .context("Failed to serialize rules to YAML")?
+                    serde_yaml::to_string(&rules).context("Failed to serialize rules to YAML")?
                 }
-                OutputFormat::Json => {
-                    serde_json::to_string_pretty(&rules)
-                        .context("Failed to serialize rules to JSON")?
-                }
+                OutputFormat::Json => serde_json::to_string_pretty(&rules)
+                    .context("Failed to serialize rules to JSON")?,
             };
-            
+
             println!("{}", output);
             println!("\nTotal rules: {}", rules.len());
         }
     }
-    
+
     Ok(())
 }
 
 async fn delete_rule(name: &str) -> Result<()> {
     // Access pinned BPF maps
     let maps = open_pinned_maps()?;
-    
+
     // Delete from BPF maps (both rules and metadata)
     let rule = RulesState::delete_rule(&maps, name)?
         .ok_or_else(|| anyhow::anyhow!("Rule '{}' not found", name))?;
-    
+
     println!("✓ Deleted rule '{}'  (IP: {})", name, rule.ip);
     println!("Rule is now inactive in the eBPF firewall.");
-    
+
     Ok(())
 }
 
 fn show_stats(format: OutputFormat) -> Result<()> {
-    use serde::{Serialize, Deserialize};
-    
+    use serde::{Deserialize, Serialize};
+
     #[derive(Serialize, Deserialize)]
     struct RuleStatsOutput {
         name: String,
@@ -486,17 +478,19 @@ fn show_stats(format: OutputFormat) -> Result<()> {
         #[serde(skip_serializing_if = "Option::is_none")]
         human_readable_bytes: Option<String>,
     }
-    
+
     let maps = open_pinned_maps()?;
-    let stats = maps.get_stats_by_name()
+    let stats = maps
+        .get_stats_by_name()
         .context("Failed to get statistics from BPF maps")?;
-    
+
     if stats.is_empty() {
         println!("No statistics available (no packets matched any rules)");
         return Ok(());
     }
-    
-    let mut stats_list: Vec<RuleStatsOutput> = stats.iter()
+
+    let mut stats_list: Vec<RuleStatsOutput> = stats
+        .iter()
         .map(|(name, (packets, bytes))| {
             let human_readable = format_bytes_human(*bytes);
             RuleStatsOutput {
@@ -507,40 +501,41 @@ fn show_stats(format: OutputFormat) -> Result<()> {
             }
         })
         .collect();
-    
+
     // Sort by packets descending
     stats_list.sort_by(|a, b| b.packets.cmp(&a.packets));
-    
+
     let output = match format {
         OutputFormat::Yaml => {
-            serde_yaml::to_string(&stats_list)
-                .context("Failed to serialize stats to YAML")?
+            serde_yaml::to_string(&stats_list).context("Failed to serialize stats to YAML")?
         }
-        OutputFormat::Json => {
-            serde_json::to_string_pretty(&stats_list)
-                .context("Failed to serialize stats to JSON")?
-        }
+        OutputFormat::Json => serde_json::to_string_pretty(&stats_list)
+            .context("Failed to serialize stats to JSON")?,
     };
-    
+
     println!("{}", output);
-    
+
     // Summary
     let total_packets: u64 = stats_list.iter().map(|s| s.packets).sum();
     let total_bytes: u64 = stats_list.iter().map(|s| s.bytes).sum();
-    println!("\nTotal: {} packets, {} bytes ({})", 
-        total_packets, total_bytes, format_bytes_human(total_bytes));
-    
+    println!(
+        "\nTotal: {} packets, {} bytes ({})",
+        total_packets,
+        total_bytes,
+        format_bytes_human(total_bytes)
+    );
+
     Ok(())
 }
 
 fn reset_stats() -> Result<()> {
     let maps = open_pinned_maps()?;
-    
+
     maps.reset_all_stats()
         .context("Failed to reset statistics")?;
-    
+
     println!("✓ All statistics have been reset");
-    
+
     Ok(())
 }
 

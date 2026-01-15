@@ -1,9 +1,9 @@
+use crate::models::rule::{Action, Direction, Protocol, Rule};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::Ipv4Addr;
 use std::path::Path;
-use crate::models::rule::{Action, Direction, Protocol, Rule};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyRule {
@@ -41,26 +41,41 @@ impl PolicyRule {
         let (ip, subnet_mask) = if self.ip.contains('/') {
             let parts: Vec<&str> = self.ip.split('/').collect();
             if parts.len() != 2 {
-                anyhow::bail!("Invalid CIDR notation '{}' in rule '{}'", self.ip, self.name);
+                anyhow::bail!(
+                    "Invalid CIDR notation '{}' in rule '{}'",
+                    self.ip,
+                    self.name
+                );
             }
-            let ip: Ipv4Addr = parts[0].parse()
-                .with_context(|| format!("Invalid IP address '{}' in rule '{}'", parts[0], self.name))?;
-            let prefix: u8 = parts[1].parse()
-                .with_context(|| format!("Invalid CIDR prefix '{}' in rule '{}'", parts[1], self.name))?;
+            let ip: Ipv4Addr = parts[0].parse().with_context(|| {
+                format!("Invalid IP address '{}' in rule '{}'", parts[0], self.name)
+            })?;
+            let prefix: u8 = parts[1].parse().with_context(|| {
+                format!("Invalid CIDR prefix '{}' in rule '{}'", parts[1], self.name)
+            })?;
             if prefix > 32 {
-                anyhow::bail!("CIDR prefix must be <= 32, got {} in rule '{}'", prefix, self.name);
+                anyhow::bail!(
+                    "CIDR prefix must be <= 32, got {} in rule '{}'",
+                    prefix,
+                    self.name
+                );
             }
             (ip, Some(prefix))
         } else {
-            let ip: Ipv4Addr = self.ip.parse()
-                .with_context(|| format!("Invalid IP address '{}' in rule '{}'", self.ip, self.name))?;
+            let ip: Ipv4Addr = self.ip.parse().with_context(|| {
+                format!("Invalid IP address '{}' in rule '{}'", self.ip, self.name)
+            })?;
             (ip, None)
         };
-        
+
         let action = match self.action.to_lowercase().as_str() {
             "allow" | "pass" | "accept" => Action::Allow,
             "drop" | "deny" | "block" => Action::Drop,
-            _ => anyhow::bail!("Invalid action '{}' in rule '{}'. Must be 'allow' or 'drop'", self.action, self.name),
+            _ => anyhow::bail!(
+                "Invalid action '{}' in rule '{}'. Must be 'allow' or 'drop'",
+                self.action,
+                self.name
+            ),
         };
 
         let protocol = match self.protocol.to_lowercase().as_str() {
@@ -68,18 +83,26 @@ impl PolicyRule {
             "udp" => Protocol::UDP,
             "icmp" => Protocol::ICMP,
             "any" | "" => Protocol::Any,
-            _ => anyhow::bail!("Invalid protocol '{}' in rule '{}'. Must be tcp, udp, icmp, or any", self.protocol, self.name),
+            _ => anyhow::bail!(
+                "Invalid protocol '{}' in rule '{}'. Must be tcp, udp, icmp, or any",
+                self.protocol,
+                self.name
+            ),
         };
 
         let direction = match self.direction.to_lowercase().as_str() {
             "ingress" | "in" | "input" => Direction::Ingress,
             "egress" | "out" | "output" => Direction::Egress,
             "both" | "any" => Direction::Both,
-            _ => anyhow::bail!("Invalid direction '{}' in rule '{}'. Must be ingress, egress, or both", self.direction, self.name),
+            _ => anyhow::bail!(
+                "Invalid direction '{}' in rule '{}'. Must be ingress, egress, or both",
+                self.direction,
+                self.name
+            ),
         };
 
-        Ok(Rule { 
-            ip, 
+        Ok(Rule {
+            ip,
             subnet_mask,
             action,
             protocol,
@@ -94,19 +117,17 @@ pub fn parse_policy_file<P: AsRef<Path>>(path: P) -> Result<PolicyFile> {
     let path = path.as_ref();
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read policy file: {}", path.display()))?;
-    
+
     // Detect format based on file extension
-    let extension = path.extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("yaml"); // Default to YAML
-    
+    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("yaml"); // Default to YAML
+
     let policy: PolicyFile = match extension {
         "json" => serde_json::from_str(&content)
             .with_context(|| format!("Failed to parse policy file as JSON: {}", path.display()))?,
-        "yaml" | "yml" | _ => serde_yaml::from_str(&content)
+        _ => serde_yaml::from_str(&content)
             .with_context(|| format!("Failed to parse policy file as YAML: {}", path.display()))?,
     };
-    
+
     Ok(policy)
 }
 
@@ -255,7 +276,9 @@ mod tests {
 
     #[test]
     fn test_protocol_case_insensitive() {
-        let test_cases = vec!["TCP", "Tcp", "tCp", "UDP", "Udp", "ICMP", "Icmp", "ANY", "Any"];
+        let test_cases = vec![
+            "TCP", "Tcp", "tCp", "UDP", "Udp", "ICMP", "Icmp", "ANY", "Any",
+        ];
         for protocol in test_cases {
             let rule = create_test_rule("test", "192.168.1.1", "allow", protocol);
             let result = rule.to_rule();
@@ -320,11 +343,11 @@ mod tests {
     #[test]
     fn test_valid_port_boundaries() {
         let mut rule = create_test_rule("test", "192.168.1.1", "allow", "tcp");
-        
+
         // Test minimum port
         rule.src_port = Some(0);
         assert!(rule.to_rule().is_ok());
-        
+
         // Test maximum port
         rule.src_port = Some(65535);
         assert!(rule.to_rule().is_ok());
@@ -342,11 +365,11 @@ mod tests {
             dst_port: Some(80),
             direction: "ingress".to_string(),
         };
-        
+
         let result = rule.to_rule();
         assert!(result.is_ok());
         let parsed = result.unwrap();
-        
+
         assert_eq!(parsed.ip.to_string(), "10.0.0.0");
         assert_eq!(parsed.subnet_mask, Some(8));
         assert!(matches!(parsed.action, Action::Drop));
@@ -397,7 +420,10 @@ mod tests {
         rule.direction = "invalid".to_string();
         let result = rule.to_rule();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid direction"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid direction"));
     }
 
     #[test]
@@ -410,7 +436,7 @@ mod tests {
             "UPPERCASE_RULE",
             "MiXeD_CaSe-RuLe.123",
         ];
-        
+
         for name in special_names {
             let rule = create_test_rule(name, "192.168.1.1", "allow", "tcp");
             assert!(rule.to_rule().is_ok(), "Name '{}' should be valid", name);
@@ -434,7 +460,7 @@ mod tests {
             ("1.2.3", false),
             ("1.2.3.4.5", false),
         ];
-        
+
         for (ip, should_pass) in edge_cases {
             let rule = create_test_rule("test", ip, "allow", "tcp");
             let result = rule.to_rule();
@@ -453,11 +479,16 @@ mod tests {
             ("192.168.1.0/-1", false),
             ("192.168.1.0/abc", false),
         ];
-        
+
         for (cidr, should_pass) in edge_cases {
             let rule = create_test_rule("test", cidr, "allow", "tcp");
             let result = rule.to_rule();
-            assert_eq!(result.is_ok(), should_pass, "CIDR '{}' validity mismatch", cidr);
+            assert_eq!(
+                result.is_ok(),
+                should_pass,
+                "CIDR '{}' validity mismatch",
+                cidr
+            );
         }
     }
 
@@ -478,22 +509,32 @@ mod tests {
         let protocols = vec!["TcP", "tCp", "TCP", "tcp", "UdP", "uDP", "UDP", "udp"];
         for protocol in protocols {
             let rule = create_test_rule("test", "192.168.1.1", "allow", protocol);
-            assert!(rule.to_rule().is_ok(), "Protocol '{}' should be valid", protocol);
+            assert!(
+                rule.to_rule().is_ok(),
+                "Protocol '{}' should be valid",
+                protocol
+            );
         }
     }
 
     #[test]
     fn test_mixed_case_action() {
-        let actions = vec!["AlLoW", "aLlOw", "DrOp", "dRoP", "PASS", "pass", "DENY", "deny"];
+        let actions = vec![
+            "AlLoW", "aLlOw", "DrOp", "dRoP", "PASS", "pass", "DENY", "deny",
+        ];
         for action in actions {
             let rule = create_test_rule("test", "192.168.1.1", action, "tcp");
-            assert!(rule.to_rule().is_ok(), "Action '{}' should be valid", action);
+            assert!(
+                rule.to_rule().is_ok(),
+                "Action '{}' should be valid",
+                action
+            );
         }
     }
 
     #[test]
     fn test_empty_protocol_defaults_to_any() {
-        let mut rule = create_test_rule("test", "192.168.1.1", "allow", "");
+        let rule = create_test_rule("test", "192.168.1.1", "allow", "");
         let result = rule.to_rule();
         assert!(result.is_ok());
         assert!(matches!(result.unwrap().protocol, Protocol::Any));
@@ -534,7 +575,7 @@ mod tests {
             (6379, "Redis"),
             (27017, "MongoDB"),
         ];
-        
+
         for (port, _service) in ports {
             let mut rule = create_test_rule("test", "192.168.1.1", "allow", "tcp");
             rule.dst_port = Some(port);
