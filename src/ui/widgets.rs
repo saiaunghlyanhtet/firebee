@@ -174,3 +174,76 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         ])
         .split(popup_layout[1])[1]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_number_single_digits() {
+        assert_eq!(format_number(0), "0");
+        assert_eq!(format_number(9), "9");
+        assert_eq!(format_number(99), "99");
+        assert_eq!(format_number(999), "999");
+    }
+
+    #[test]
+    fn test_format_number_thousands() {
+        assert_eq!(format_number(1_000), "1.0K");
+        assert_eq!(format_number(1_500), "1.5K");
+        assert_eq!(format_number(999_999), "1000.0K");
+    }
+
+    #[test]
+    fn test_format_number_millions() {
+        assert_eq!(format_number(1_000_000), "1.0M");
+        assert_eq!(format_number(5_500_000), "5.5M");
+        assert_eq!(format_number(999_999_999), "1000.0M");
+    }
+
+    #[test]
+    fn test_format_number_billions() {
+        assert_eq!(format_number(1_000_000_000), "1.0B");
+        assert_eq!(format_number(5_500_000_000), "5.5B");
+        assert_eq!(format_number(u64::MAX), "18446744073.7B");
+    }
+
+    #[test]
+    fn test_format_bytes_small() {
+        assert_eq!(format_bytes(0), "0B");
+        assert_eq!(format_bytes(1), "1B");
+        assert_eq!(format_bytes(512), "512B");
+        assert_eq!(format_bytes(1023), "1023B");
+    }
+
+    #[test]
+    fn test_format_bytes_kilobytes() {
+        assert_eq!(format_bytes(1_024), "1.0KB");
+        assert_eq!(format_bytes(1_536), "1.5KB");
+        assert_eq!(format_bytes(1_048_575), "1024.0KB");
+    }
+
+    #[test]
+    fn test_format_bytes_megabytes() {
+        assert_eq!(format_bytes(1_048_576), "1.0MB");
+        assert_eq!(format_bytes(5_242_880), "5.0MB");
+        assert_eq!(format_bytes(1_073_741_823), "1024.0MB");
+    }
+
+    #[test]
+    fn test_format_bytes_gigabytes() {
+        assert_eq!(format_bytes(1_073_741_824), "1.0GB");
+        assert_eq!(format_bytes(5_368_709_120), "5.0GB");
+        // u64::MAX formatting - check that it produces reasonable output
+        let max_formatted = format_bytes(u64::MAX);
+        assert!(max_formatted.ends_with("GB"));
+        assert!(max_formatted.starts_with("17179869"));
+    }
+
+    #[test]
+    fn test_format_bytes_precision() {
+        assert_eq!(format_bytes(1_536), "1.5KB");
+        assert_eq!(format_bytes(2_621_440), "2.5MB");
+        assert_eq!(format_bytes(2_684_354_560), "2.5GB");
+    }
+}
