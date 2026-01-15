@@ -354,4 +354,191 @@ mod tests {
         assert_eq!(parsed.src_port, Some(443));
         assert_eq!(parsed.dst_port, Some(80));
     }
+
+    #[test]
+    fn test_direction_ingress_variants() {
+        let variants = vec!["ingress", "in", "input", "INGRESS", "In", "INPUT"];
+        for direction in variants {
+            let mut rule = create_test_rule("test", "192.168.1.1", "allow", "tcp");
+            rule.direction = direction.to_string();
+            let result = rule.to_rule();
+            assert!(result.is_ok(), "Direction '{}' should be valid", direction);
+            assert!(matches!(result.unwrap().direction, Direction::Ingress));
+        }
+    }
+
+    #[test]
+    fn test_direction_egress_variants() {
+        let variants = vec!["egress", "out", "output", "EGRESS", "Out", "OUTPUT"];
+        for direction in variants {
+            let mut rule = create_test_rule("test", "192.168.1.1", "allow", "tcp");
+            rule.direction = direction.to_string();
+            let result = rule.to_rule();
+            assert!(result.is_ok(), "Direction '{}' should be valid", direction);
+            assert!(matches!(result.unwrap().direction, Direction::Egress));
+        }
+    }
+
+    #[test]
+    fn test_direction_both_variants() {
+        let variants = vec!["both", "any", "BOTH", "ANY"];
+        for direction in variants {
+            let mut rule = create_test_rule("test", "192.168.1.1", "allow", "tcp");
+            rule.direction = direction.to_string();
+            let result = rule.to_rule();
+            assert!(result.is_ok(), "Direction '{}' should be valid", direction);
+            assert!(matches!(result.unwrap().direction, Direction::Both));
+        }
+    }
+
+    #[test]
+    fn test_invalid_direction() {
+        let mut rule = create_test_rule("test", "192.168.1.1", "allow", "tcp");
+        rule.direction = "invalid".to_string();
+        let result = rule.to_rule();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid direction"));
+    }
+
+    #[test]
+    fn test_name_with_special_characters() {
+        let special_names = vec![
+            "rule-with-dashes",
+            "rule_with_underscores",
+            "rule.with.dots",
+            "rule123",
+            "UPPERCASE_RULE",
+            "MiXeD_CaSe-RuLe.123",
+        ];
+        
+        for name in special_names {
+            let rule = create_test_rule(name, "192.168.1.1", "allow", "tcp");
+            assert!(rule.to_rule().is_ok(), "Name '{}' should be valid", name);
+        }
+    }
+
+    #[test]
+    fn test_description_with_special_characters() {
+        let mut rule = create_test_rule("test", "192.168.1.1", "allow", "tcp");
+        rule.description = Some("Block malicious traffic from 192.168.1.1 (攻撃者)".to_string());
+        assert!(rule.to_rule().is_ok());
+    }
+
+    #[test]
+    fn test_ipv4_edge_cases() {
+        let edge_cases = vec![
+            ("0.0.0.0", true),
+            ("255.255.255.255", true),
+            ("127.0.0.1", true),
+            ("256.0.0.1", false),
+            ("1.2.3", false),
+            ("1.2.3.4.5", false),
+        ];
+        
+        for (ip, should_pass) in edge_cases {
+            let rule = create_test_rule("test", ip, "allow", "tcp");
+            let result = rule.to_rule();
+            assert_eq!(result.is_ok(), should_pass, "IP '{}' validity mismatch", ip);
+        }
+    }
+
+    #[test]
+    fn test_cidr_edge_cases() {
+        let edge_cases = vec![
+            ("192.168.1.0/0", true),
+            ("192.168.1.0/1", true),
+            ("192.168.1.0/31", true),
+            ("192.168.1.0/32", true),
+            ("192.168.1.0/33", false),
+            ("192.168.1.0/-1", false),
+            ("192.168.1.0/abc", false),
+        ];
+        
+        for (cidr, should_pass) in edge_cases {
+            let rule = create_test_rule("test", cidr, "allow", "tcp");
+            let result = rule.to_rule();
+            assert_eq!(result.is_ok(), should_pass, "CIDR '{}' validity mismatch", cidr);
+        }
+    }
+
+    #[test]
+    fn test_port_value_zero() {
+        let mut rule = create_test_rule("test", "192.168.1.1", "allow", "tcp");
+        rule.src_port = Some(0);
+        rule.dst_port = Some(0);
+        let result = rule.to_rule();
+        assert!(result.is_ok());
+        let parsed = result.unwrap();
+        assert_eq!(parsed.src_port, Some(0));
+        assert_eq!(parsed.dst_port, Some(0));
+    }
+
+    #[test]
+    fn test_mixed_case_protocol() {
+        let protocols = vec!["TcP", "tCp", "TCP", "tcp", "UdP", "uDP", "UDP", "udp"];
+        for protocol in protocols {
+            let rule = create_test_rule("test", "192.168.1.1", "allow", protocol);
+            assert!(rule.to_rule().is_ok(), "Protocol '{}' should be valid", protocol);
+        }
+    }
+
+    #[test]
+    fn test_mixed_case_action() {
+        let actions = vec!["AlLoW", "aLlOw", "DrOp", "dRoP", "PASS", "pass", "DENY", "deny"];
+        for action in actions {
+            let rule = create_test_rule("test", "192.168.1.1", action, "tcp");
+            assert!(rule.to_rule().is_ok(), "Action '{}' should be valid", action);
+        }
+    }
+
+    #[test]
+    fn test_empty_protocol_defaults_to_any() {
+        let mut rule = create_test_rule("test", "192.168.1.1", "allow", "");
+        let result = rule.to_rule();
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap().protocol, Protocol::Any));
+    }
+
+    #[test]
+    fn test_rule_without_ports() {
+        let rule = create_test_rule("test", "192.168.1.1", "allow", "icmp");
+        let result = rule.to_rule();
+        assert!(result.is_ok());
+        let parsed = result.unwrap();
+        assert_eq!(parsed.src_port, None);
+        assert_eq!(parsed.dst_port, None);
+    }
+
+    #[test]
+    fn test_partial_ports() {
+        let mut rule1 = create_test_rule("test1", "192.168.1.1", "allow", "tcp");
+        rule1.src_port = Some(8080);
+        rule1.dst_port = None;
+        assert!(rule1.to_rule().is_ok());
+
+        let mut rule2 = create_test_rule("test2", "192.168.1.1", "allow", "tcp");
+        rule2.src_port = None;
+        rule2.dst_port = Some(443);
+        assert!(rule2.to_rule().is_ok());
+    }
+
+    #[test]
+    fn test_common_service_ports() {
+        let ports = vec![
+            (80, "HTTP"),
+            (443, "HTTPS"),
+            (22, "SSH"),
+            (53, "DNS"),
+            (3306, "MySQL"),
+            (5432, "PostgreSQL"),
+            (6379, "Redis"),
+            (27017, "MongoDB"),
+        ];
+        
+        for (port, _service) in ports {
+            let mut rule = create_test_rule("test", "192.168.1.1", "allow", "tcp");
+            rule.dst_port = Some(port);
+            assert!(rule.to_rule().is_ok());
+        }
+    }
 }
