@@ -49,4 +49,70 @@ static __always_inline int protocol_matches(__u8 packet_proto, __u8 rule_proto) 
     return rule_proto == IPPROTO_ANY || rule_proto == packet_proto;
 }
 
+/*
+ * Check if an IPv6 address matches a rule with prefix length
+ * 
+ * @packet_ip: IPv6 address from the packet (__u32[4] in network byte order)
+ * @rule_ip: IPv6 address from the rule (__u32[4] in network byte order)
+ * @prefix_len: Prefix length (0-128)
+ * 
+ * Returns: 1 if match, 0 if no match
+ */
+static __always_inline int ipv6_matches(__u32 packet_ip[4], __u32 rule_ip[4], __u8 prefix_len) {
+    if (prefix_len == 0) {
+        /* Match any IPv6 address (::/0) */
+        return 1;
+    }
+    
+    if (prefix_len == 128) {
+        /* Exact IPv6 match */
+        return packet_ip[0] == rule_ip[0] && 
+               packet_ip[1] == rule_ip[1] && 
+               packet_ip[2] == rule_ip[2] && 
+               packet_ip[3] == rule_ip[3];
+    }
+    
+    /* CIDR prefix match - explicit unrolling to avoid variable stack offsets */
+    __u32 mask;
+    
+    /* Check word 0 (bits 0-31) */
+    if (prefix_len >= 32) {
+        if (packet_ip[0] != rule_ip[0]) return 0;
+    } else {
+        /* Partial match on first word */
+        mask = bpf_htonl(0xFFFFFFFF << (32 - prefix_len));
+        if ((packet_ip[0] & mask) != (rule_ip[0] & mask)) return 0;
+        return 1;
+    }
+    
+    /* Check word 1 (bits 32-63) */
+    if (prefix_len >= 64) {
+        if (packet_ip[1] != rule_ip[1]) return 0;
+    } else if (prefix_len > 32) {
+        /* Partial match on second word */
+        mask = bpf_htonl(0xFFFFFFFF << (64 - prefix_len));
+        if ((packet_ip[1] & mask) != (rule_ip[1] & mask)) return 0;
+        return 1;
+    }
+    
+    /* Check word 2 (bits 64-95) */
+    if (prefix_len >= 96) {
+        if (packet_ip[2] != rule_ip[2]) return 0;
+    } else if (prefix_len > 64) {
+        /* Partial match on third word */
+        mask = bpf_htonl(0xFFFFFFFF << (96 - prefix_len));
+        if ((packet_ip[2] & mask) != (rule_ip[2] & mask)) return 0;
+        return 1;
+    }
+    
+    /* Check word 3 (bits 96-127) */
+    if (prefix_len > 96) {
+        /* Partial match on fourth word */
+        mask = bpf_htonl(0xFFFFFFFF << (128 - prefix_len));
+        if ((packet_ip[3] & mask) != (rule_ip[3] & mask)) return 0;
+    }
+    
+    return 1;
+}
+
 #endif /* __FIREBEE_HELPERS_H__ */

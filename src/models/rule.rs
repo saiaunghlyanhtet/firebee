@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub enum Action {
@@ -65,8 +65,8 @@ impl Protocol {
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Rule {
-    pub ip: Ipv4Addr,
-    pub subnet_mask: Option<u8>, // CIDR prefix length (e.g., 24 for /24)
+    pub ip: IpAddr,
+    pub subnet_mask: Option<u8>, // CIDR prefix length (e.g., 24 for /24 IPv4, 64 for /64 IPv6)
     pub action: Action,
     pub protocol: Protocol,
     pub direction: Direction,
@@ -75,6 +75,8 @@ pub struct Rule {
 }
 
 impl Rule {
+    /// Get subnet mask as u32 for IPv4 addresses
+    /// For IPv6, this should not be used - use get_ipv6_prefix_mask instead
     pub fn get_subnet_mask_u32(&self) -> u32 {
         match self.subnet_mask {
             Some(prefix) => {
@@ -87,6 +89,35 @@ impl Rule {
                 }
             }
             None => 0xFFFFFFFF, // Exact match
+        }
+    }
+
+    /// Get prefix length for IPv6 addresses
+    pub fn get_ipv6_prefix_len(&self) -> u8 {
+        self.subnet_mask.unwrap_or(128) // Default to /128 (exact match) for IPv6
+    }
+
+    /// Check if this rule is for IPv6
+    #[allow(dead_code)]
+    pub fn is_ipv6(&self) -> bool {
+        matches!(self.ip, IpAddr::V6(_))
+    }
+
+    /// Get IPv4 address if this is an IPv4 rule
+    #[allow(dead_code)]
+    pub fn as_ipv4(&self) -> Option<Ipv4Addr> {
+        match self.ip {
+            IpAddr::V4(addr) => Some(addr),
+            IpAddr::V6(_) => None,
+        }
+    }
+
+    /// Get IPv6 address if this is an IPv6 rule
+    #[allow(dead_code)]
+    pub fn as_ipv6(&self) -> Option<Ipv6Addr> {
+        match self.ip {
+            IpAddr::V4(_) => None,
+            IpAddr::V6(addr) => Some(addr),
         }
     }
 }
@@ -150,7 +181,7 @@ mod tests {
     #[test]
     fn test_subnet_mask_exact_match() {
         let rule = Rule {
-            ip: Ipv4Addr::new(192, 168, 1, 1),
+            ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
             subnet_mask: None,
             action: Action::Allow,
             protocol: Protocol::TCP,
@@ -164,7 +195,7 @@ mod tests {
     #[test]
     fn test_subnet_mask_zero() {
         let rule = Rule {
-            ip: Ipv4Addr::new(0, 0, 0, 0),
+            ip: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
             subnet_mask: Some(0),
             action: Action::Allow,
             protocol: Protocol::TCP,
@@ -178,7 +209,7 @@ mod tests {
     #[test]
     fn test_subnet_mask_24() {
         let rule = Rule {
-            ip: Ipv4Addr::new(192, 168, 1, 0),
+            ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 0)),
             subnet_mask: Some(24),
             action: Action::Allow,
             protocol: Protocol::TCP,
@@ -193,7 +224,7 @@ mod tests {
     #[test]
     fn test_subnet_mask_16() {
         let rule = Rule {
-            ip: Ipv4Addr::new(192, 168, 0, 0),
+            ip: IpAddr::V4(Ipv4Addr::new(192, 168, 0, 0)),
             subnet_mask: Some(16),
             action: Action::Allow,
             protocol: Protocol::TCP,
@@ -208,7 +239,7 @@ mod tests {
     #[test]
     fn test_subnet_mask_8() {
         let rule = Rule {
-            ip: Ipv4Addr::new(10, 0, 0, 0),
+            ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)),
             subnet_mask: Some(8),
             action: Action::Allow,
             protocol: Protocol::TCP,
@@ -223,7 +254,7 @@ mod tests {
     #[test]
     fn test_subnet_mask_32() {
         let rule = Rule {
-            ip: Ipv4Addr::new(192, 168, 1, 1),
+            ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
             subnet_mask: Some(32),
             action: Action::Allow,
             protocol: Protocol::TCP,
@@ -237,7 +268,7 @@ mod tests {
     #[test]
     fn test_subnet_mask_greater_than_32() {
         let rule = Rule {
-            ip: Ipv4Addr::new(192, 168, 1, 1),
+            ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
             subnet_mask: Some(33),
             action: Action::Allow,
             protocol: Protocol::TCP,
@@ -273,7 +304,7 @@ mod tests {
     #[test]
     fn test_rule_with_ports() {
         let rule = Rule {
-            ip: Ipv4Addr::new(192, 168, 1, 1),
+            ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
             subnet_mask: None,
             action: Action::Allow,
             protocol: Protocol::TCP,
@@ -288,7 +319,7 @@ mod tests {
     #[test]
     fn test_rule_clone() {
         let rule = Rule {
-            ip: Ipv4Addr::new(192, 168, 1, 1),
+            ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
             subnet_mask: Some(24),
             action: Action::Allow,
             protocol: Protocol::TCP,
@@ -302,5 +333,80 @@ mod tests {
         assert_eq!(rule.action, cloned.action);
         assert_eq!(rule.protocol, cloned.protocol);
         assert_eq!(rule.direction, cloned.direction);
+    }
+
+    // IPv6 tests
+    #[test]
+    fn test_ipv6_is_ipv6() {
+        let rule = Rule {
+            ip: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+            subnet_mask: Some(64),
+            action: Action::Allow,
+            protocol: Protocol::TCP,
+            direction: Direction::Ingress,
+            src_port: None,
+            dst_port: None,
+        };
+        assert!(rule.is_ipv6());
+        assert_eq!(rule.get_ipv6_prefix_len(), 64);
+    }
+
+    #[test]
+    fn test_ipv4_is_not_ipv6() {
+        let rule = Rule {
+            ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+            subnet_mask: Some(24),
+            action: Action::Allow,
+            protocol: Protocol::TCP,
+            direction: Direction::Ingress,
+            src_port: None,
+            dst_port: None,
+        };
+        assert!(!rule.is_ipv6());
+    }
+
+    #[test]
+    fn test_ipv6_default_prefix() {
+        let rule = Rule {
+            ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
+            subnet_mask: None,
+            action: Action::Drop,
+            protocol: Protocol::Any,
+            direction: Direction::Both,
+            src_port: None,
+            dst_port: None,
+        };
+        assert_eq!(rule.get_ipv6_prefix_len(), 128); // Default to exact match
+    }
+
+    #[test]
+    fn test_as_ipv4() {
+        let rule = Rule {
+            ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+            subnet_mask: None,
+            action: Action::Allow,
+            protocol: Protocol::TCP,
+            direction: Direction::Ingress,
+            src_port: None,
+            dst_port: None,
+        };
+        assert_eq!(rule.as_ipv4(), Some(Ipv4Addr::new(192, 168, 1, 1)));
+        assert_eq!(rule.as_ipv6(), None);
+    }
+
+    #[test]
+    fn test_as_ipv6() {
+        let addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+        let rule = Rule {
+            ip: IpAddr::V6(addr),
+            subnet_mask: Some(64),
+            action: Action::Allow,
+            protocol: Protocol::TCP,
+            direction: Direction::Ingress,
+            src_port: None,
+            dst_port: None,
+        };
+        assert_eq!(rule.as_ipv6(), Some(addr));
+        assert_eq!(rule.as_ipv4(), None);
     }
 }

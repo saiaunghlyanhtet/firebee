@@ -2,7 +2,7 @@ use crate::models::rule::{Action, Direction, Rule};
 use anyhow::Result;
 use libbpf_rs::{Link, MapCore, ObjectBuilder, TcHook, TcHookBuilder, TC_EGRESS};
 use std::fs;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::os::fd::AsFd;
 use std::path::Path;
 
@@ -253,7 +253,7 @@ impl BpfLoader {
                         };
 
                         rules.push(Rule {
-                            ip,
+                            ip: IpAddr::V4(ip),
                             subnet_mask,
                             action,
                             protocol,

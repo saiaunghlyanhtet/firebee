@@ -40,22 +40,18 @@ impl RulesState {
 
     /// Get a specific rule by name from BPF metadata map
     pub fn get_rule(maps: &BpfMaps, name: &str) -> Result<Option<PolicyRule>> {
-        let metadata = maps
-            .get_rule_metadata(name)
-            .context("Failed to get rule metadata from BPF map")?;
-
-        Ok(metadata.map(|m| m.to_policy_rule()))
+        maps.get_rule_metadata(name)
+            .context("Failed to get rule metadata from BPF map")
     }
 
     /// Delete a rule from both BPF maps
     pub fn delete_rule(maps: &BpfMaps, name: &str) -> Result<Option<PolicyRule>> {
         // First get the metadata to find the rule details
-        let metadata = maps
+        let policy_rule = maps
             .get_rule_metadata(name)
             .context("Failed to get rule metadata")?;
 
-        if let Some(meta) = metadata {
-            let policy_rule = meta.to_policy_rule();
+        if let Some(policy_rule) = policy_rule {
             let rule = policy_rule
                 .to_rule()
                 .context("Failed to convert policy rule for deletion")?;
