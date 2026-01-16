@@ -1,7 +1,7 @@
 use crate::models::rule::{Action, Direction, Rule};
 use crate::policy::PolicyRule;
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use tokio::sync::mpsc;
 
 #[allow(dead_code)]
@@ -58,7 +58,7 @@ impl App {
     pub async fn add_rule(&mut self, ip: &str, action: Action) -> bool {
         if let Ok(ip_addr) = ip.parse::<Ipv4Addr>() {
             let rule = Rule {
-                ip: ip_addr,
+                ip: IpAddr::V4(ip_addr),
                 subnet_mask: None,
                 action: action.clone(),
                 protocol: crate::models::rule::Protocol::Any,

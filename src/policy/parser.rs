@@ -2,7 +2,7 @@ use crate::models::rule::{Action, Direction, Protocol, Rule};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,25 +47,44 @@ impl PolicyRule {
                     self.name
                 );
             }
-            let ip: Ipv4Addr = parts[0].parse().with_context(|| {
-                format!("Invalid IP address '{}' in rule '{}'", parts[0], self.name)
-            })?;
-            let prefix: u8 = parts[1].parse().with_context(|| {
-                format!("Invalid CIDR prefix '{}' in rule '{}'", parts[1], self.name)
-            })?;
-            if prefix > 32 {
-                anyhow::bail!(
-                    "CIDR prefix must be <= 32, got {} in rule '{}'",
-                    prefix,
-                    self.name
-                );
+
+            // Try IPv4 first, then IPv6
+            if let Ok(ipv4) = parts[0].parse::<Ipv4Addr>() {
+                let prefix: u8 = parts[1].parse().with_context(|| {
+                    format!("Invalid CIDR prefix '{}' in rule '{}'", parts[1], self.name)
+                })?;
+                if prefix > 32 {
+                    anyhow::bail!(
+                        "IPv4 CIDR prefix must be <= 32, got {} in rule '{}'",
+                        prefix,
+                        self.name
+                    );
+                }
+                (IpAddr::V4(ipv4), Some(prefix))
+            } else if let Ok(ipv6) = parts[0].parse::<Ipv6Addr>() {
+                let prefix: u8 = parts[1].parse().with_context(|| {
+                    format!("Invalid CIDR prefix '{}' in rule '{}'", parts[1], self.name)
+                })?;
+                if prefix > 128 {
+                    anyhow::bail!(
+                        "IPv6 CIDR prefix must be <= 128, got {} in rule '{}'",
+                        prefix,
+                        self.name
+                    );
+                }
+                (IpAddr::V6(ipv6), Some(prefix))
+            } else {
+                anyhow::bail!("Invalid IP address '{}' in rule '{}'", parts[0], self.name)
             }
-            (ip, Some(prefix))
         } else {
-            let ip: Ipv4Addr = self.ip.parse().with_context(|| {
-                format!("Invalid IP address '{}' in rule '{}'", self.ip, self.name)
-            })?;
-            (ip, None)
+            // Try IPv4 first, then IPv6
+            if let Ok(ipv4) = self.ip.parse::<Ipv4Addr>() {
+                (IpAddr::V4(ipv4), None)
+            } else if let Ok(ipv6) = self.ip.parse::<Ipv6Addr>() {
+                (IpAddr::V6(ipv6), None)
+            } else {
+                anyhow::bail!("Invalid IP address '{}' in rule '{}'", self.ip, self.name)
+            }
         };
 
         let action = match self.action.to_lowercase().as_str() {
