@@ -46,13 +46,9 @@ impl BpfLoader {
         let mut builder = ObjectBuilder::default();
         let mut open_obj = builder.open_file("target/bpf/firebee.bpf.o")?;
 
-        // Set custom pin path for maps before loading
-        // LIBBPF_PIN_BY_NAME in BPF code will handle auto-pinning/reusing
-        // Skip internal/compiler-generated maps (starting with . or firebee_)
         for mut map in open_obj.maps_mut() {
             let map_name = map.name().to_string_lossy().to_string();
 
-            // Skip compiler-generated maps (.rodata, .bss, .data, etc)
             if map_name.starts_with('.') || map_name.starts_with("firebee_") {
                 continue;
             }
@@ -74,18 +70,15 @@ impl BpfLoader {
 
         let mut prog = prog.ok_or_else(|| anyhow::anyhow!("xdp_firewall program not found"))?;
 
-        // Pin the program for persistence
         let prog_pin_path = format!("{}/xdp_firewall", FIREBEE_DIR);
         match prog.pin(&prog_pin_path) {
             Ok(_) => log::info!("Pinned program to {}", prog_pin_path),
             Err(e) => log::warn!("Could not pin program: {} (may already be pinned)", e),
         }
 
-        // Attach XDP program to interface
         let mut link = prog.attach_xdp(Self::get_ifindex(iface)?)?;
         log::info!("Attached XDP program to interface {}", iface);
 
-        // Pin the link to keep XDP attached even after process exits
         let link_pin_path = format!("{}/xdp_link", FIREBEE_DIR);
         match link.pin(&link_pin_path) {
             Ok(_) => log::info!("Pinned XDP link to {}", link_pin_path),
@@ -94,7 +87,6 @@ impl BpfLoader {
 
         let links = vec![link];
 
-        // Load and attach TC-BPF egress program
         let (egress_obj, tc_hook) = Self::load_egress_program(iface, reuse_maps)?;
 
         Ok(BpfLoader {
@@ -137,13 +129,9 @@ impl BpfLoader {
         let mut builder = ObjectBuilder::default();
         let mut open_obj = builder.open_file("target/bpf/firebee_egress.bpf.o")?;
 
-        // Set pin paths for maps before loading
-        // LIBBPF_PIN_BY_NAME in BPF code will handle auto-pinning/reusing
-        // Skip internal/compiler-generated maps (starting with . or firebee_)
         for mut map in open_obj.maps_mut() {
             let map_name = map.name().to_string_lossy().to_string();
 
-            // Skip compiler-generated maps (.rodata, .bss, .data, etc)
             if map_name.starts_with('.') || map_name.starts_with("firebee_") {
                 continue;
             }
@@ -168,7 +156,6 @@ impl BpfLoader {
         let obj = open_obj.load()?;
         log::info!("TC egress: BPF object loaded successfully");
 
-        // Find the TC egress program and attach it
         let ifindex = Self::get_ifindex(iface)?;
         let mut tc_hook: Option<TcHook> = None;
 
@@ -176,14 +163,12 @@ impl BpfLoader {
             if prog.name().to_string_lossy() == "tc_egress_firewall" {
                 log::info!("Found TC egress program, attaching to interface {}", iface);
 
-                // Pin the TC program
                 let prog_pin_path = format!("{}/tc_egress_firewall", FIREBEE_DIR);
                 match prog.pin(&prog_pin_path) {
                     Ok(_) => log::info!("Pinned TC egress program to {}", prog_pin_path),
                     Err(e) => log::warn!("Could not pin TC egress program: {}", e),
                 }
 
-                // Attach using libbpf-rs TC hook API
                 let prog_fd = prog.as_fd();
                 let mut hook = TcHookBuilder::new(prog_fd)
                     .ifindex(ifindex)
@@ -191,10 +176,8 @@ impl BpfLoader {
                     .priority(1)
                     .hook(TC_EGRESS);
 
-                // Create clsact qdisc (ignore error if already exists)
                 let _ = hook.create();
 
-                // Attach the hook
                 match hook.attach() {
                     Ok(_) => {
                         log::info!("Successfully attached TC egress program to {}", iface);
@@ -257,7 +240,7 @@ impl BpfLoader {
                             subnet_mask,
                             action,
                             protocol,
-                            direction: Direction::Ingress, // Default for backward compat
+                            direction: Direction::Ingress,
                             src_port: if rule_key.src_port == 0 {
                                 None
                             } else {
@@ -282,7 +265,6 @@ impl BpfLoader {
     pub fn unload(iface: &str) -> Result<()> {
         log::info!("Unloading BPF programs and unpinning maps");
 
-        // Detach TC egress hook first
         log::info!("Detaching TC egress program from interface {}", iface);
         let tc_detach = std::process::Command::new("tc")
             .args(["filter", "del", "dev", iface, "egress"])
@@ -303,7 +285,6 @@ impl BpfLoader {
             }
         }
 
-        // Detach XDP program
         log::info!("Ensuring XDP program is detached from interface {}", iface);
         let detach_status = std::process::Command::new("ip")
             .args(["link", "set", "dev", iface, "xdp", "off"])
@@ -321,7 +302,6 @@ impl BpfLoader {
             }
         }
 
-        // Give kernel a moment to clean up
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         if Path::new(FIREBEE_DIR).exists() {
@@ -356,7 +336,6 @@ impl BpfLoader {
         Ok(())
     }
 
-    // Get network interface index
     fn get_ifindex(iface: &str) -> Result<i32> {
         let output = std::process::Command::new("ip")
             .args(["link", "show", iface])
@@ -368,7 +347,6 @@ impl BpfLoader {
             .next()
             .ok_or_else(|| anyhow::anyhow!("No output from ip link show"))?;
 
-        // Parse "2: wlp2s0: ..." to get the index
         let index_str = first_line
             .split(':')
             .next()
@@ -380,7 +358,6 @@ impl BpfLoader {
             .map_err(|e| anyhow::anyhow!("Could not parse index as i32: {}", e))
     }
 
-    // Create directory for pinned objects
     fn create_pin_directory() -> Result<()> {
         if !Path::new(FIREBEE_DIR).exists() {
             log::info!("Creating directory for pinned BPF objects: {}", FIREBEE_DIR);

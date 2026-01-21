@@ -9,9 +9,9 @@ pub enum Action {
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub enum Direction {
-    Ingress, // Incoming traffic
-    Egress,  // Outgoing traffic
-    Both,    // Both directions
+    Ingress,
+    Egress,
+    Both,
 }
 
 impl Direction {
@@ -28,7 +28,7 @@ impl Direction {
             0 => Direction::Ingress,
             1 => Direction::Egress,
             2 => Direction::Both,
-            _ => Direction::Ingress, // Default to ingress
+            _ => Direction::Ingress,
         }
     }
 }
@@ -66,7 +66,7 @@ impl Protocol {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Rule {
     pub ip: IpAddr,
-    pub subnet_mask: Option<u8>, // CIDR prefix length (e.g., 24 for /24 IPv4, 64 for /64 IPv6)
+    pub subnet_mask: Option<u8>,
     pub action: Action,
     pub protocol: Protocol,
     pub direction: Direction,
@@ -75,8 +75,6 @@ pub struct Rule {
 }
 
 impl Rule {
-    /// Get subnet mask as u32 for IPv4 addresses
-    /// For IPv6, this should not be used - use get_ipv6_prefix_mask instead
     pub fn get_subnet_mask_u32(&self) -> u32 {
         match self.subnet_mask {
             Some(prefix) => {
@@ -92,18 +90,15 @@ impl Rule {
         }
     }
 
-    /// Get prefix length for IPv6 addresses
     pub fn get_ipv6_prefix_len(&self) -> u8 {
-        self.subnet_mask.unwrap_or(128) // Default to /128 (exact match) for IPv6
+        self.subnet_mask.unwrap_or(128)
     }
 
-    /// Check if this rule is for IPv6
     #[allow(dead_code)]
     pub fn is_ipv6(&self) -> bool {
         matches!(self.ip, IpAddr::V6(_))
     }
 
-    /// Get IPv4 address if this is an IPv4 rule
     #[allow(dead_code)]
     pub fn as_ipv4(&self) -> Option<Ipv4Addr> {
         match self.ip {
@@ -112,7 +107,6 @@ impl Rule {
         }
     }
 
-    /// Get IPv6 address if this is an IPv6 rule
     #[allow(dead_code)]
     pub fn as_ipv6(&self) -> Option<Ipv6Addr> {
         match self.ip {

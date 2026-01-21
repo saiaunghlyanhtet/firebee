@@ -40,42 +40,31 @@ enum OutputFormat {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Attach and load the XDP firewall program
     Run {
-        /// Network interface to attach the XDP program to
         interface: String,
 
-        /// Optional policy file to load rules from
         #[arg(short, long)]
         policy: Option<PathBuf>,
     },
-    /// Show the firewall TUI (interactive interface)
     Ui,
-    /// Add rules from a policy file
     Add {
-        /// Network interface (must already have firebee running or use with --attach)
         #[arg(short, long)]
         interface: Option<String>,
 
-        /// Policy file containing rules to add
         #[arg(short, long)]
         policy: PathBuf,
 
-        /// Attach to interface if not already attached
         #[arg(short, long)]
         attach: bool,
     },
-    /// Get rule information
     Get {
         #[command(subcommand)]
         command: GetCommands,
     },
-    /// Delete rule
     Delete {
         #[command(subcommand)]
         command: DeleteCommands,
     },
-    /// Show statistics
     Stats {
         #[command(subcommand)]
         command: StatsCommands,
@@ -84,12 +73,9 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum GetCommands {
-    /// Get rule(s) - shows all rules if name not provided
     Rule {
-        /// Name of the rule to retrieve (optional - shows all if omitted)
         name: Option<String>,
 
-        /// Output format
         #[arg(short, long, value_enum, default_value = "yaml")]
         output: OutputFormat,
     },
@@ -97,22 +83,15 @@ enum GetCommands {
 
 #[derive(Subcommand)]
 enum DeleteCommands {
-    /// Delete a rule by name
-    Rule {
-        /// Name of the rule to delete
-        name: String,
-    },
+    Rule { name: String },
 }
 
 #[derive(Subcommand)]
 enum StatsCommands {
-    /// Show statistics for all rules
     Show {
-        /// Output format
         #[arg(short, long, value_enum, default_value = "yaml")]
         output: OutputFormat,
     },
-    /// Reset all statistics
     Reset,
 }
 
@@ -164,7 +143,6 @@ async fn run_firewall(interface: &str, policy: Option<PathBuf>) -> Result<()> {
     let _loader = BpfLoader::new(interface)?;
     println!("✓ XDP program attached to {}", interface);
 
-    // Load rules from policy file if provided
     if let Some(policy_path) = policy {
         println!(
             "\nLoading rules from policy file: {}",
@@ -205,23 +183,20 @@ async fn run_firewall(interface: &str, policy: Option<PathBuf>) -> Result<()> {
 }
 
 async fn run_tui() -> Result<()> {
-    let (tx_cmd, _rx_cmd) = mpsc::channel(32); // Commands: UI -> BPF
-    let (tx_log, rx_log) = mpsc::channel(32); // Logs: BPF -> UI
+    let (tx_cmd, _rx_cmd) = mpsc::channel(32);
+    let (tx_log, rx_log) = mpsc::channel(32);
 
-    // Load existing rules from BPF maps
     let maps = open_pinned_maps()?;
     let existing_rules = RulesState::list_rules(&maps).unwrap_or_else(|e| {
         log::warn!("Failed to load existing rules: {}", e);
         Vec::new()
     });
 
-    // Start event reader thread to consume ring buffer events
     let tx_log_clone = tx_log.clone();
     let event_handle = std::thread::spawn(move || {
         use libbpf_rs::RingBufferBuilder;
         use std::net::Ipv4Addr;
 
-        // Open maps inside the thread since they're not Send
         let maps = match open_pinned_maps() {
             Ok(m) => m,
             Err(e) => {
@@ -269,14 +244,11 @@ async fn run_tui() -> Result<()> {
 
     let mut app = App::new(tx_cmd, rx_log, existing_rules);
 
-    // Update stats periodically
     let mut stats_interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
 
     loop {
-        // Update app logs
         app.update().await;
 
-        // Periodically update statistics
         tokio::select! {
             _ = stats_interval.tick() => {
                 if let Ok(maps) = open_pinned_maps() {
@@ -297,7 +269,6 @@ async fn run_tui() -> Result<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
 
-    // Stop the event reader thread
     drop(event_handle);
 
     Ok(())
@@ -310,7 +281,6 @@ async fn add_rules_from_policy(
 ) -> Result<()> {
     println!("Reading policy file: {}", policy_path.display());
 
-    // Parse and validate the policy file
     let policy = parse_policy_file(&policy_path)?;
 
     validate_policy(&policy)?;
@@ -318,7 +288,6 @@ async fn add_rules_from_policy(
 
     println!("Found {} rules to add", policy.rules.len());
 
-    // If attach flag is set, load the BPF program
     let _loader = if attach {
         let iface =
             interface.ok_or_else(|| anyhow::anyhow!("--interface required when using --attach"))?;
@@ -328,13 +297,11 @@ async fn add_rules_from_policy(
         None
     };
 
-    // Access the BPF maps (either newly created or pinned)
     let maps = if _loader.is_some() {
         // If we just attached, the maps are newly created and pinned
         // We need to open them from the pinned location
         open_pinned_maps()?
     } else {
-        // If not attaching, try to open existing pinned maps
         open_pinned_maps()?
     };
 
@@ -356,8 +323,6 @@ async fn add_rules_from_policy(
     println!("\nSuccessfully added {} rules!", policy.rules.len());
     println!("Rules are now active in the eBPF firewall.");
 
-    // Keep the loader alive if we attached
-    // This prevents the XDP program from being detached
     if _loader.is_some() {
         println!("\nXDP program is attached and will remain active.");
         println!("The program will stay loaded even after this command exits.");
@@ -370,7 +335,6 @@ async fn add_rules_from_policy(
 fn open_pinned_maps() -> Result<BpfMaps<'static>> {
     use std::path::Path;
 
-    // Check if maps are pinned
     const FIREBEE_DIR: &str = "/sys/fs/bpf/firebee";
     let rules_map_path = format!("{}/rules_map", FIREBEE_DIR);
 
@@ -383,15 +347,12 @@ fn open_pinned_maps() -> Result<BpfMaps<'static>> {
         );
     }
 
-    // Get or initialize the singleton BPF object
     let obj = PINNED_BPF_OBJ.get_or_try_init(|| -> Result<libbpf_rs::Object> {
-        // Open BPF object and reuse pinned maps
         let mut builder = libbpf_rs::ObjectBuilder::default();
         let mut open_obj = builder
             .open_file("target/bpf/firebee.bpf.o")
             .context("Failed to open BPF object file")?;
 
-        // Set all maps to reuse pinned paths instead of creating new ones
         for mut map in open_obj.maps_mut() {
             let map_name = map.name().to_string_lossy().to_string();
             let pin_path = format!("{}/{}", FIREBEE_DIR, map_name);
@@ -410,7 +371,6 @@ fn open_pinned_maps() -> Result<BpfMaps<'static>> {
 }
 
 fn get_rule(name: Option<&str>, format: OutputFormat) -> Result<()> {
-    // Access pinned BPF maps
     let maps = open_pinned_maps()?;
 
     match name {
@@ -429,7 +389,6 @@ fn get_rule(name: Option<&str>, format: OutputFormat) -> Result<()> {
             println!("{}", output);
         }
         None => {
-            // Get all rules
             let rules = RulesState::list_rules(&maps)?;
 
             if rules.is_empty() {
@@ -454,10 +413,8 @@ fn get_rule(name: Option<&str>, format: OutputFormat) -> Result<()> {
 }
 
 async fn delete_rule(name: &str) -> Result<()> {
-    // Access pinned BPF maps
     let maps = open_pinned_maps()?;
 
-    // Delete from BPF maps (both rules and metadata)
     let rule = RulesState::delete_rule(&maps, name)?
         .ok_or_else(|| anyhow::anyhow!("Rule '{}' not found", name))?;
 
@@ -502,7 +459,6 @@ fn show_stats(format: OutputFormat) -> Result<()> {
         })
         .collect();
 
-    // Sort by packets descending
     stats_list.sort_by(|a, b| b.packets.cmp(&a.packets));
 
     let output = match format {
@@ -515,7 +471,6 @@ fn show_stats(format: OutputFormat) -> Result<()> {
 
     println!("{}", output);
 
-    // Summary
     let total_packets: u64 = stats_list.iter().map(|s| s.packets).sum();
     let total_bytes: u64 = stats_list.iter().map(|s| s.bytes).sum();
     println!(
