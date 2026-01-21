@@ -104,36 +104,32 @@ impl BpfHandler {
                     }
                     Command::RemoveRule(ip) => {
                         if let Some(maps) = self.maps.as_ref() {
-                            // Try to find the rule in metadata by searching for matching IP
-                            // This ensures we get the correct protocol, ports, and subnet mask
                             let mut found = false;
 
-                            // Iterate through metadata to find matching IP
                             match maps.list_all_metadata() {
                                 Ok(policy_rules) => {
                                     for policy_rule in policy_rules {
-                                        // Parse the IP from CIDR format
                                         if let Ok(rule) = policy_rule.to_rule() {
                                             if rule.ip == ip {
-                                                // Found the rule with matching IP, now delete it
                                                 if let Err(e) = maps.remove_rule(&rule) {
                                                     log::error!(
                                                         "Failed to remove rule from rules map: {}",
                                                         e
                                                     );
+                                                } else if let Err(e) =
+                                                    maps.delete_rule_metadata(&policy_rule.name)
+                                                {
+                                                    log::error!(
+                                                        "Failed to delete rule metadata: {}",
+                                                        e
+                                                    );
                                                 } else {
-                                                    // Also delete the metadata
-                                                    if let Err(e) =
-                                                        maps.delete_rule_metadata(&policy_rule.name)
-                                                    {
-                                                        log::error!(
-                                                            "Failed to delete rule metadata: {}",
-                                                            e
-                                                        );
-                                                    } else {
-                                                        log::info!("Successfully removed rule '{}' for IP {}", policy_rule.name, ip);
-                                                        found = true;
-                                                    }
+                                                    log::info!(
+                                                        "Successfully removed rule '{}' for IP {}",
+                                                        policy_rule.name,
+                                                        ip
+                                                    );
+                                                    found = true;
                                                 }
                                                 break;
                                             }
@@ -189,7 +185,6 @@ impl BpfHandler {
 
 impl Drop for BpfHandler {
     fn drop(&mut self) {
-        // Ensure the maps drop before the underlying object to respect lifetimes.
         if let Some(_maps) = self.maps.take() {}
         if let Some(obj) = self.bpf_object.take() {
             drop(obj);

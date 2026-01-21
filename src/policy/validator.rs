@@ -3,7 +3,6 @@ use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 
 pub fn validate_policy(policy: &PolicyFile) -> Result<()> {
-    // Check if we have any rules
     if policy.rules.is_empty() {
         anyhow::bail!("Policy file must contain at least one rule");
     }
@@ -14,22 +13,18 @@ pub fn validate_policy(policy: &PolicyFile) -> Result<()> {
     for (idx, rule) in policy.rules.iter().enumerate() {
         let rule_pos = format!("rule #{} ('{}')", idx + 1, rule.name);
 
-        // Validate rule name is not empty
         if rule.name.is_empty() {
             anyhow::bail!("{}: rule name cannot be empty", rule_pos);
         }
 
-        // Check for duplicate rule names
         if !seen_names.insert(rule.name.clone()) {
             anyhow::bail!("{}: duplicate rule name '{}'", rule_pos, rule.name);
         }
 
-        // Validate IP address format by attempting to parse it
         let _ = rule
             .to_rule()
             .with_context(|| format!("{}: validation failed", rule_pos))?;
 
-        // Check for duplicate IPs (warning, not error)
         if let Some(prev_idx) = seen_ips.insert(rule.ip.clone(), idx) {
             log::warn!(
                 "Warning: IP {} appears in multiple rules: '{}' and '{}'",
@@ -39,7 +34,6 @@ pub fn validate_policy(policy: &PolicyFile) -> Result<()> {
             );
         }
 
-        // Validate action
         let action_lower = rule.action.to_lowercase();
         if !["allow", "pass", "accept", "drop", "deny", "block"].contains(&action_lower.as_str()) {
             anyhow::bail!(
@@ -176,7 +170,6 @@ mod tests {
             }],
         };
         let result = validate_policy(&policy);
-        // Should fail during to_rule() conversion, which happens in validation
         assert!(
             result.is_err(),
             "Invalid action 'reject' should cause validation to fail"

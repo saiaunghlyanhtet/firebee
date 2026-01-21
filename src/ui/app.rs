@@ -18,7 +18,7 @@ pub struct App {
     pub input_mode: bool,
     pub confirm_unload: bool,
     pub unload_requested: bool,
-    pub rule_stats: HashMap<String, (u64, u64)>, // name -> (packets, bytes)
+    pub rule_stats: HashMap<String, (u64, u64)>,
     cmd_tx: mpsc::Sender<Command>,
     log_rx: mpsc::Receiver<String>,
 }
@@ -66,7 +66,6 @@ impl App {
                 src_port: None,
                 dst_port: None,
             };
-            // Create a PolicyRule for display
             let policy_rule = PolicyRule {
                 name: format!("rule_{}", ip),
                 ip: ip.to_string(),

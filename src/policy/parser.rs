@@ -37,7 +37,6 @@ pub struct PolicyFile {
 
 impl PolicyRule {
     pub fn to_rule(&self) -> Result<Rule> {
-        // Parse IP with optional CIDR notation
         let (ip, subnet_mask) = if self.ip.contains('/') {
             let parts: Vec<&str> = self.ip.split('/').collect();
             if parts.len() != 2 {
@@ -48,7 +47,6 @@ impl PolicyRule {
                 );
             }
 
-            // Try IPv4 first, then IPv6
             if let Ok(ipv4) = parts[0].parse::<Ipv4Addr>() {
                 let prefix: u8 = parts[1].parse().with_context(|| {
                     format!("Invalid CIDR prefix '{}' in rule '{}'", parts[1], self.name)
@@ -76,15 +74,12 @@ impl PolicyRule {
             } else {
                 anyhow::bail!("Invalid IP address '{}' in rule '{}'", parts[0], self.name)
             }
+        } else if let Ok(ipv4) = self.ip.parse::<Ipv4Addr>() {
+            (IpAddr::V4(ipv4), None)
+        } else if let Ok(ipv6) = self.ip.parse::<Ipv6Addr>() {
+            (IpAddr::V6(ipv6), None)
         } else {
-            // Try IPv4 first, then IPv6
-            if let Ok(ipv4) = self.ip.parse::<Ipv4Addr>() {
-                (IpAddr::V4(ipv4), None)
-            } else if let Ok(ipv6) = self.ip.parse::<Ipv6Addr>() {
-                (IpAddr::V6(ipv6), None)
-            } else {
-                anyhow::bail!("Invalid IP address '{}' in rule '{}'", self.ip, self.name)
-            }
+            anyhow::bail!("Invalid IP address '{}' in rule '{}'", self.ip, self.name)
         };
 
         let action = match self.action.to_lowercase().as_str() {
@@ -137,7 +132,6 @@ pub fn parse_policy_file<P: AsRef<Path>>(path: P) -> Result<PolicyFile> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read policy file: {}", path.display()))?;
 
-    // Detect format based on file extension
     let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("yaml"); // Default to YAML
 
     let policy: PolicyFile = match extension {

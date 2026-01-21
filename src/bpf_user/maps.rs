@@ -3,7 +3,6 @@ use crate::policy::PolicyRule;
 use libbpf_rs::{Map, MapCore};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-// IPv4 structures (keep existing for backward compatibility)
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct RuleEntry {
@@ -18,12 +17,11 @@ pub struct RuleEntry {
     pub _padding: [u8; 2],
 }
 
-// IPv6 structures (new)
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct RuleEntryV6 {
-    pub src_ip: [u8; 16], // IPv6 address (128 bits)
-    pub prefix_len: u8,   // CIDR prefix length (0-128)
+    pub src_ip: [u8; 16],
+    pub prefix_len: u8,
     pub protocol: u8,
     pub action: u8,
     pub direction: u8,
@@ -31,7 +29,6 @@ pub struct RuleEntryV6 {
     pub _padding: [u8; 3],
     pub src_port: u16,
     pub dst_port: u16,
-    // No _padding2 - C struct is 28 bytes total
 }
 
 #[repr(C)]
@@ -63,7 +60,6 @@ pub struct RuleStats {
     pub bytes: u64,
 }
 
-// IPv4 metadata
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct RuleMetadata {
@@ -79,7 +75,6 @@ pub struct RuleMetadata {
     pub description: [u8; 128],
 }
 
-// IPv6 metadata
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct RuleMetadataV6 {
@@ -92,7 +87,6 @@ pub struct RuleMetadataV6 {
     pub dst_port: u16,
     pub name: [u8; 64],
     pub description: [u8; 128],
-    // Total: 216 bytes (matches C struct)
 }
 
 impl RuleMetadata {
@@ -282,7 +276,7 @@ impl RuleMetadataV6 {
             protocol: match self.protocol {
                 6 => "tcp".to_string(),
                 17 => "udp".to_string(),
-                58 => "icmpv6".to_string(), // ICMPv6
+                58 => "icmpv6".to_string(),
                 1 => "icmp".to_string(),
                 _ => "any".to_string(),
             },
@@ -376,7 +370,6 @@ impl<'a> BpfMaps<'a> {
         let ip_u32 = u32::from_be_bytes(ipv4.octets());
         let subnet_mask = rule.get_subnet_mask_u32();
 
-        // Create a rule entry for the array map
         let entry = RuleEntry {
             src_ip: ip_u32,
             subnet_mask,
@@ -396,7 +389,6 @@ impl<'a> BpfMaps<'a> {
             )
         };
 
-        // Find first empty slot or update existing rule
         let mut slot_index: Option<u32> = None;
 
         for i in 0..1024u32 {
@@ -405,7 +397,6 @@ impl<'a> BpfMaps<'a> {
                 if value.len() >= std::mem::size_of::<RuleEntry>() {
                     let existing = unsafe { std::ptr::read(value.as_ptr() as *const RuleEntry) };
 
-                    // Check if this is the same rule (update case)
                     if existing.valid == 1
                         && existing.src_ip == ip_u32
                         && existing.subnet_mask == subnet_mask
@@ -418,16 +409,12 @@ impl<'a> BpfMaps<'a> {
                         break;
                     }
 
-                    // Track first empty slot
                     if existing.valid == 0 && slot_index.is_none() {
                         slot_index = Some(i);
                     }
                 }
-            } else {
-                // Empty slot found
-                if slot_index.is_none() {
-                    slot_index = Some(i);
-                }
+            } else if slot_index.is_none() {
+                slot_index = Some(i);
             }
         }
 
@@ -460,7 +447,6 @@ impl<'a> BpfMaps<'a> {
         let ip_u32 = u32::from_be_bytes(ipv4.octets());
         let subnet_mask = rule.get_subnet_mask_u32();
 
-        // Find and invalidate the matching rule entry
         for i in 0..1024u32 {
             let i_bytes = i.to_ne_bytes();
             if let Some(value) = self.rules.lookup(&i_bytes, libbpf_rs::MapFlags::ANY)? {
@@ -474,7 +460,6 @@ impl<'a> BpfMaps<'a> {
                         && existing.src_port == rule.src_port.unwrap_or(0)
                         && existing.dst_port == rule.dst_port.unwrap_or(0)
                     {
-                        // Mark as invalid
                         let mut entry = existing;
                         entry.valid = 0;
 
@@ -514,7 +499,6 @@ impl<'a> BpfMaps<'a> {
 
         let prefix_len = rule.get_ipv6_prefix_len();
 
-        // Find and invalidate the matching rule entry
         for i in 0..1024u32 {
             let i_bytes = i.to_ne_bytes();
             if let Some(value) = rules_v6.lookup(&i_bytes, libbpf_rs::MapFlags::ANY)? {
@@ -528,7 +512,6 @@ impl<'a> BpfMaps<'a> {
                         && existing.src_port == rule.src_port.unwrap_or(0)
                         && existing.dst_port == rule.dst_port.unwrap_or(0)
                     {
-                        // Mark as invalid
                         let mut entry = existing;
                         entry.valid = 0;
 
@@ -572,7 +555,6 @@ impl<'a> BpfMaps<'a> {
 
         let prefix_len = rule.get_ipv6_prefix_len();
 
-        // Create a rule entry for the array map
         let entry = RuleEntryV6 {
             src_ip: ipv6.octets(),
             prefix_len,
@@ -592,7 +574,6 @@ impl<'a> BpfMaps<'a> {
             )
         };
 
-        // Find first empty slot or update existing rule
         let mut slot_index: Option<u32> = None;
         let mut slots_checked = 0u32;
         let mut valid_slots = 0u32;
@@ -610,7 +591,6 @@ impl<'a> BpfMaps<'a> {
                         valid_slots += 1;
                     }
 
-                    // Check if this is the same rule (update case)
                     if existing.valid == 1
                         && existing.src_ip == ipv6.octets()
                         && existing.prefix_len == prefix_len
@@ -624,7 +604,6 @@ impl<'a> BpfMaps<'a> {
                         break;
                     }
 
-                    // Track first empty slot
                     if existing.valid == 0 && slot_index.is_none() {
                         slot_index = Some(i);
                         log::info!("Found empty IPv6 slot (valid=0) at index {}", i);
@@ -640,7 +619,6 @@ impl<'a> BpfMaps<'a> {
                     }
                 }
             } else {
-                // Empty slot found (no entry exists yet)
                 none_count += 1;
                 if slot_index.is_none() {
                     slot_index = Some(i);
@@ -680,14 +658,12 @@ impl<'a> BpfMaps<'a> {
     pub fn get_all_rules(&self) -> Result<Vec<Rule>, libbpf_rs::Error> {
         let mut rules = Vec::new();
 
-        // Iterate through array map entries
         for i in 0..1024u32 {
             let i_bytes = i.to_ne_bytes();
             if let Some(value) = self.rules.lookup(&i_bytes, libbpf_rs::MapFlags::ANY)? {
                 if value.len() >= std::mem::size_of::<RuleEntry>() {
                     let entry = unsafe { std::ptr::read(value.as_ptr() as *const RuleEntry) };
 
-                    // Only include valid entries
                     if entry.valid == 0 {
                         continue;
                     }
@@ -733,7 +709,6 @@ impl<'a> BpfMaps<'a> {
         Ok(rules)
     }
 
-    // Metadata map operations
     pub fn add_rule_metadata(
         &self,
         name: &str,
@@ -813,7 +788,6 @@ impl<'a> BpfMaps<'a> {
         let name_len = name.len().min(63);
         key_bytes[..name_len].copy_from_slice(&name.as_bytes()[..name_len]);
 
-        // Try IPv4 metadata first
         if let Some(value) = self
             .metadata
             .lookup(&key_bytes[..], libbpf_rs::MapFlags::ANY)?
@@ -824,7 +798,6 @@ impl<'a> BpfMaps<'a> {
             }
         }
 
-        // Try IPv6 metadata if IPv4 not found
         if let Some(metadata_v6) = &self.metadata_v6 {
             if let Some(value) = metadata_v6.lookup(&key_bytes[..], libbpf_rs::MapFlags::ANY)? {
                 if value.len() >= std::mem::size_of::<RuleMetadataV6>() {
@@ -843,33 +816,27 @@ impl<'a> BpfMaps<'a> {
         let name_len = name.len().min(63);
         key_bytes[..name_len].copy_from_slice(&name.as_bytes()[..name_len]);
 
-        // Try to delete from IPv4 metadata
         let ipv4_result = self.metadata.delete(&key_bytes[..]);
 
-        // Also try IPv6 metadata
         if let Some(metadata_v6) = &self.metadata_v6 {
             let ipv6_result = metadata_v6.delete(&key_bytes[..]);
-            // If IPv6 deletion succeeded, that's fine
             if ipv6_result.is_ok() {
                 log::info!("Deleted IPv6 metadata for rule '{}'", name);
                 return Ok(());
             }
         }
 
-        // If IPv4 deletion succeeded, return Ok
         if ipv4_result.is_ok() {
             log::info!("Deleted IPv4 metadata for rule '{}'", name);
             return Ok(());
         }
 
-        // Both failed, return the IPv4 error
         ipv4_result
     }
 
     pub fn list_all_metadata(&self) -> Result<Vec<PolicyRule>, libbpf_rs::Error> {
         let mut rules = Vec::new();
 
-        // Get IPv4 rules
         for key in self.metadata.keys() {
             if let Some(value) = self.metadata.lookup(&key, libbpf_rs::MapFlags::ANY)? {
                 if value.len() >= std::mem::size_of::<RuleMetadata>() {
@@ -879,7 +846,6 @@ impl<'a> BpfMaps<'a> {
             }
         }
 
-        // Get IPv6 rules
         if let Some(metadata_v6) = &self.metadata_v6 {
             for key in metadata_v6.keys() {
                 if let Some(value) = metadata_v6.lookup(&key, libbpf_rs::MapFlags::ANY)? {
@@ -895,7 +861,6 @@ impl<'a> BpfMaps<'a> {
         Ok(rules)
     }
 
-    /// Get statistics for a specific rule by index
     pub fn get_rule_stats(&self, index: u32) -> Result<Option<RuleStats>, libbpf_rs::Error> {
         let index_bytes = index.to_ne_bytes();
 
@@ -908,7 +873,6 @@ impl<'a> BpfMaps<'a> {
         Ok(None)
     }
 
-    /// Get statistics for all rules
     #[allow(dead_code)]
     pub fn get_all_stats(&self) -> Result<Vec<(u32, RuleStats)>, libbpf_rs::Error> {
         let mut stats_list = Vec::new();
@@ -918,7 +882,6 @@ impl<'a> BpfMaps<'a> {
             if let Some(value) = self.stats.lookup(&i_bytes, libbpf_rs::MapFlags::ANY)? {
                 if value.len() >= std::mem::size_of::<RuleStats>() {
                     let stats = unsafe { std::ptr::read(value.as_ptr() as *const RuleStats) };
-                    // Only include non-zero stats
                     if stats.packets > 0 || stats.bytes > 0 {
                         stats_list.push((i, stats));
                     }
@@ -929,7 +892,6 @@ impl<'a> BpfMaps<'a> {
         Ok(stats_list)
     }
 
-    /// Reset statistics for a specific rule
     pub fn reset_rule_stats(&self, index: u32) -> Result<(), libbpf_rs::Error> {
         let index_bytes = index.to_ne_bytes();
         let zero_stats = RuleStats {
@@ -949,7 +911,6 @@ impl<'a> BpfMaps<'a> {
         Ok(())
     }
 
-    /// Reset all statistics
     pub fn reset_all_stats(&self) -> Result<(), libbpf_rs::Error> {
         for i in 0..1024u32 {
             self.reset_rule_stats(i)?;
@@ -957,8 +918,6 @@ impl<'a> BpfMaps<'a> {
         Ok(())
     }
 
-    /// Get statistics mapped to rule names
-    /// Returns a HashMap of rule_name -> (packets, bytes)
     pub fn get_stats_by_name(
         &self,
     ) -> Result<std::collections::HashMap<String, (u64, u64)>, libbpf_rs::Error> {
@@ -966,7 +925,6 @@ impl<'a> BpfMaps<'a> {
 
         let mut stats_map = HashMap::new();
 
-        // First, build a map of rule attributes to index
         let mut rule_index_map: HashMap<(u32, u32, u8, u16, u16), u32> = HashMap::new();
 
         for i in 0..1024u32 {
@@ -989,7 +947,6 @@ impl<'a> BpfMaps<'a> {
             }
         }
 
-        // Now iterate through metadata and match with stats
         for key in self.metadata.keys() {
             if let Some(value) = self.metadata.lookup(&key, libbpf_rs::MapFlags::ANY)? {
                 if value.len() >= std::mem::size_of::<RuleMetadata>() {

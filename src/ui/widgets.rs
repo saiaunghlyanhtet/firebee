@@ -39,7 +39,6 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
 
         let description = r.description.as_deref().unwrap_or("-");
 
-        // Format stats - get from app.rule_stats if available
         let (packets, bytes) = app
             .rule_stats
             .get(&r.name)
@@ -94,12 +93,10 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
 
     f.render_widget(rules_table, chunks[0]);
 
-    // Logs pane
     let logs = List::new(app.logs.iter().map(|l| ListItem::new(l.as_str())))
         .block(Block::default().borders(Borders::ALL).title("Logs"));
     f.render_widget(logs, chunks[1]);
 
-    // Help bar at the bottom
     let help_text = "Shortcuts: [Q] Quit | Use 'firebee add' command to add rules";
     let help = Paragraph::new(help_text)
         .style(Style::default().fg(Color::Gray))
@@ -107,7 +104,6 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(help, chunks[2]);
 
-    // Input popup (when input_mode is true)
     if app.input_mode {
         let popup = Paragraph::new(app.input.to_text()).block(
             Block::default()
@@ -119,7 +115,6 @@ pub fn render_ui(f: &mut Frame, app: &mut App) {
         f.render_widget(popup, area);
     }
 
-    // Unload confirmation dialog
     if app.confirm_unload {
         let warning_text = [
             "WARNING: This will unload the XDP firewall program!",
