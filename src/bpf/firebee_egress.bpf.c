@@ -18,240 +18,6 @@
 #define ETH_P_IP 0x0800
 #define ETH_P_IPV6 0x86DD
 
-
-/*
- * Extract transport layer ports from packet
- * Only applies to TCP and UDP protocols
- */
-static __always_inline void extract_ports_egress(
-	struct iphdr *iph,
-	void *data_end,
-	__u8 protocol,
-	__u16 *src_port,
-	__u16 *dst_port
-) {
-	*src_port = 0;
-	*dst_port = 0;
-
-	void *l4_hdr = (void *)iph + (iph->ihl * 4);
-
-	if (protocol == IPPROTO_TCP) {
-		struct tcphdr *tcph = l4_hdr;
-		if ((void *)(tcph + 1) > data_end) {
-			return;
-		}
-		*src_port = bpf_ntohs(tcph->source);
-		*dst_port = bpf_ntohs(tcph->dest);
-	} else if (protocol == IPPROTO_UDP) {
-		struct udphdr *udph = l4_hdr;
-		if ((void *)(udph + 1) > data_end) {
-			return;
-		}
-		*src_port = bpf_ntohs(udph->source);
-		*dst_port = bpf_ntohs(udph->dest);
-	}
-}
-
-/*
- * Extract transport layer ports from IPv6 packet
- * Only applies to TCP and UDP protocols
- */
-static __always_inline void extract_ports_egress_v6(
-	struct ipv6hdr *ip6h,
-	void *data_end,
-	__u8 protocol,
-	__u16 *src_port,
-	__u16 *dst_port
-) {
-	*src_port = 0;
-	*dst_port = 0;
-
-	void *l4_hdr = (void *)(ip6h + 1);
-
-	if (protocol == IPPROTO_TCP) {
-		struct tcphdr *tcph = l4_hdr;
-		if ((void *)(tcph + 1) > data_end) {
-			return;
-		}
-		*src_port = bpf_ntohs(tcph->source);
-		*dst_port = bpf_ntohs(tcph->dest);
-	} else if (protocol == IPPROTO_UDP) {
-		struct udphdr *udph = l4_hdr;
-		if ((void *)(udph + 1) > data_end) {
-			return;
-		}
-		*src_port = bpf_ntohs(udph->source);
-		*dst_port = bpf_ntohs(udph->dest);
-	}
-}
-
-/*
- * Log packet event to ring buffer for userspace
- */
-static __always_inline void log_packet_egress(__u32 dst_ip, __u8 action) {
-	struct log_event *event = bpf_ringbuf_reserve(&log_events, sizeof(*event), 0);
-	if (event) {
-		event->src_ip = dst_ip;  
-		event->action = action;
-		bpf_ringbuf_submit(event, 0);
-	}
-}
-
-
-/*
- * Check if packet matches a specific rule (egress version)
- * For egress traffic, we check the destination IP
- */
-static __always_inline int rule_matches_egress(
-	struct rule_entry *rule,
-	__u32 packet_ip,
-	__u8 protocol,
-	__u16 src_port,
-	__u16 dst_port,
-	__u8 packet_direction
-) {
-	if (rule->direction != DIRECTION_BOTH && rule->direction != packet_direction) {
-		return 0;
-	}
-
-	if (!ip_matches(packet_ip, rule->src_ip, rule->subnet_mask)) {
-		return 0;
-	}
-
-	if (!protocol_matches(protocol, rule->protocol)) {
-		return 0;
-	}
-
-	if (protocol == IPPROTO_TCP || protocol == IPPROTO_UDP) {
-		if (!port_matches(src_port, rule->src_port)) {
-			return 0;
-		}
-		if (!port_matches(dst_port, rule->dst_port)) {
-			return 0;
-		}
-	}
-
-	return 1;
-}
-
-/*
- * Find matching rule for egress packet and update statistics
- * Returns action (ACTION_ALLOW or ACTION_DROP)
- * First matching rule wins
- */
-static __always_inline __u8 find_matching_rule_egress(
-	__u32 packet_ip,
-	__u8 protocol,
-	__u16 src_port,
-	__u16 dst_port,
-	__u8 packet_direction,
-	__u32 *rule_index
-) {
-	__u8 action = ACTION_ALLOW; /* Default: allow */
-	__u32 i;
-	*rule_index = (__u32)-1; /* No match initially */
-
-	/* Bounded loop for BPF verifier compliance - only check first MAX_ACTIVE_RULES */
-	for (i = 0; i < MAX_ACTIVE_RULES; i++) {
-		__u32 key = i;
-		struct rule_entry *rule = bpf_map_lookup_elem(&rules_map, &key);
-		
-		bpf_printk("TC egress: loop iteration %d, rule ptr: %p", i, rule);
-		
-		if (!rule) {
-			continue;
-		}
-		
-		bpf_printk("TC egress: checking rule %d: ip=%u, dir=%d, valid=%d", i, rule->src_ip, rule->direction, rule->valid);
-		
-		if (!rule->valid) {
-			continue;
-		}
-
-		if (rule_matches_egress(rule, packet_ip, protocol, src_port, dst_port, packet_direction)) {
-			action = rule->action;
-			*rule_index = i;
-			bpf_printk("TC egress: MATCHED rule %d", i);
-			break; /* First match wins */
-		}
-	}
-
-	return action;
-}
-
-/*
- * Check if IPv6 packet matches a specific rule (egress version)
- * For egress traffic, we check the destination IP
- */
-static __always_inline int rule_matches_egress_v6(
-	struct rule_entry_v6 *rule,
-	__u32 packet_ip[4],
-	__u8 protocol,
-	__u16 src_port,
-	__u16 dst_port,
-	__u8 packet_direction
-) {
-	if (rule->direction != DIRECTION_BOTH && rule->direction != packet_direction) {
-		return 0;
-	}
-
-	if (!ipv6_matches(packet_ip, rule->src_ip, rule->prefix_len)) {
-		return 0;
-	}
-
-	if (!protocol_matches(protocol, rule->protocol)) {
-		return 0;
-	}
-
-	if (protocol == IPPROTO_TCP || protocol == IPPROTO_UDP) {
-		if (!port_matches(src_port, rule->src_port)) {
-			return 0;
-		}
-		if (!port_matches(dst_port, rule->dst_port)) {
-			return 0;
-		}
-	}
-
-	return 1;
-}
-
-/*
- * Find matching IPv6 rule for egress packet and update statistics
- * Returns action (ACTION_ALLOW or ACTION_DROP)
- * First matching rule wins
- */
-static __always_inline __u8 find_matching_rule_egress_v6(
-	__u32 packet_ip[4],
-	__u8 protocol,
-	__u16 src_port,
-	__u16 dst_port,
-	__u8 packet_direction,
-	__u32 *rule_index
-) {
-	__u8 action = ACTION_ALLOW; /* Default: allow */
-	__u32 i;
-	*rule_index = (__u32)-1; /* No match initially */
-
-	/* Bounded loop for BPF verifier compliance - only check first MAX_ACTIVE_RULES */
-	for (i = 0; i < MAX_ACTIVE_RULES; i++) {
-		__u32 key = i;
-		struct rule_entry_v6 *rule = bpf_map_lookup_elem(&rules_v6_map, &key);
-		
-		if (!rule || !rule->valid) {
-			continue;
-		}
-
-		if (rule_matches_egress_v6(rule, packet_ip, protocol, src_port, dst_port, packet_direction)) {
-			action = rule->action;
-			*rule_index = i;
-			bpf_printk("TC egress v6: MATCHED rule %d", i);
-			break; /* First match wins */
-		}
-	}
-
-	return action;
-}
-
 /* ========================================================================
  * TC-BPF Egress Main Program
  * ======================================================================== */
@@ -282,9 +48,9 @@ int tc_egress_firewall(struct __sk_buff *skb) {
 		
 		bpf_printk("TC egress: packet to %pI4, proto %d", &iph->daddr, protocol);
 		
-		extract_ports_egress(iph, data_end, protocol, &src_port, &dst_port);
+		extract_ports(iph, data_end, protocol, &src_port, &dst_port);
 
-		__u8 action = find_matching_rule_egress(packet_ip, protocol, src_port, dst_port, packet_direction, &matched_rule_idx);
+		__u8 action = find_matching_rule(packet_ip, protocol, src_port, dst_port, packet_direction, &matched_rule_idx);
 
 		bpf_printk("TC egress: matched rule idx %d, action %d", matched_rule_idx, action);
 
@@ -297,7 +63,7 @@ int tc_egress_firewall(struct __sk_buff *skb) {
 			}
 		}
 
-		log_packet_egress(packet_ip, action);
+		log_packet(packet_ip, action);
 
 		if (action == ACTION_DROP) {
 			bpf_printk("TC egress: DROPPING packet");
@@ -322,9 +88,9 @@ int tc_egress_firewall(struct __sk_buff *skb) {
 		__u32 matched_rule_idx;
 		__u8 packet_direction = DIRECTION_EGRESS;
 		
-		extract_ports_egress_v6(ip6h, data_end, protocol, &src_port, &dst_port);
+		extract_ports_v6(ip6h, data_end, protocol, &src_port, &dst_port);
 
-		__u8 action = find_matching_rule_egress_v6(packet_ip, protocol, src_port, dst_port, packet_direction, &matched_rule_idx);
+		__u8 action = find_matching_rule_v6(packet_ip, protocol, src_port, dst_port, packet_direction, &matched_rule_idx);
 
 		bpf_printk("TC egress v6: matched rule idx %d, action %d", matched_rule_idx, action);
 
@@ -337,7 +103,7 @@ int tc_egress_firewall(struct __sk_buff *skb) {
 			}
 		}
 
-		log_packet_egress(bpf_ntohl(packet_ip[0]), action);
+		log_packet(bpf_ntohl(packet_ip[0]), action);
 
 		if (action == ACTION_DROP) {
 			bpf_printk("TC egress v6: DROPPING packet");
