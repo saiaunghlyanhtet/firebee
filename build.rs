@@ -10,6 +10,7 @@ use libbpf_cargo::SkeletonBuilder;
 
 const SRC_INGRESS: &str = "src/bpf/firebee.bpf.c";
 const SRC_EGRESS: &str = "src/bpf/firebee_egress.bpf.c";
+const SRC_TEST: &str = "src/bpf/firebee_test.bpf.c";
 
 fn main() {
     let manifest_dir = PathBuf::from(
@@ -20,6 +21,7 @@ fn main() {
 
     let out_ingress = bpf_dir.join("firebee.skel.rs");
     let out_egress = bpf_dir.join("firebee_egress.skel.rs");
+    let out_test = bpf_dir.join("firebee_test.skel.rs");
 
     let arch = env::var("CARGO_CFG_TARGET_ARCH")
         .expect("CARGO_CFG_TARGET_ARCH must be set in build script");
@@ -42,6 +44,14 @@ fn main() {
         .build_and_generate(&out_egress)
         .unwrap();
     println!("cargo:rerun-if-changed={SRC_EGRESS}");
+
+    // Build test program (for BPF unit tests)
+    SkeletonBuilder::new()
+        .source(SRC_TEST)
+        .clang_args(&clang_args)
+        .build_and_generate(&out_test)
+        .unwrap();
+    println!("cargo:rerun-if-changed={SRC_TEST}");
 
     // Rerun if common headers change
     println!("cargo:rerun-if-changed=src/bpf/firebee_common.h");
