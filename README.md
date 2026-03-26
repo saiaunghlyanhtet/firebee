@@ -7,6 +7,7 @@ An eBPF-based network firewall for Linux that uses XDP (eXpress Data Path) for h
 - **XDP ingress filtering** — Drops or allows packets at the earliest point in the network stack, before the kernel allocates an `sk_buff`, for near line-rate performance.
 - **TC-BPF egress filtering** — Filters outgoing traffic using the Linux Traffic Control subsystem.
 - **IPv4 and IPv6 support** — Rules can target individual IPs or CIDR ranges for both address families.
+- **FQDN domain-based rules** — Block or allow traffic by domain name (e.g., `*.ads.example.com`). Firebee passively sniffs DNS responses via BPF, resolves domains to IPs, and dynamically installs/removes BPF rules with TTL-based expiry.
 - **Protocol and port matching** — Filter by TCP, UDP, ICMP, or any protocol, with optional source/destination port constraints.
 - **Declarative policy files** — Define rules in YAML or JSON; firebee validates and loads them.
 - **Per-rule statistics** — Track packet and byte counts per rule in real time.
@@ -41,36 +42,36 @@ This runs `cargo build --release` (compiles the Rust userspace binary) and `carg
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                    Userspace (Rust)                       │
-│                                                          │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────┐  │
-│  │   CLI    │  │  Policy  │  │  State   │  │   TUI   │  │
-│  │ (clap)   │  │ Parser & │  │ Manager  │  │(ratatui)│  │
-│  │          │  │Validator │  │          │  │         │  │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬────┘  │
-│       │              │             │              │       │
-│       └──────────────┴─────┬───────┴──────────────┘       │
-│                            │                              │
-│                    ┌───────▼────────┐                     │
-│                    │   BPF Loader   │                     │
-│                    │   & Maps API   │                     │
-│                    └───────┬────────┘                     │
-└────────────────────────────┼─────────────────────────────┘
-                             │  libbpf-rs
-                   ┌─────────▼──────────┐
-                   │   Pinned BPF Maps  │
-                   │ /sys/fs/bpf/firebee│
-                   └─────────┬──────────┘
-                             │
-            ┌────────────────┼────────────────┐
-            │                │                │
-   ┌────────▼──────┐  ┌─────▼──────┐  ┌──────▼───────┐
-   │  XDP Program  │  │ TC Egress  │  │  Ring Buffer │
-   │  (ingress)    │  │  Program   │  │  (log_events)│
-   │  firebee.bpf.c│  │firebee_    │  │              │
-   │               │  │egress.bpf.c│  │              │
-   └───────────────┘  └────────────┘  └──────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                      Userspace (Rust)                        │
+│                                                              │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────────┐  │
+│  │   CLI    │  │  Policy  │  │  State   │  │     TUI     │  │
+│  │ (clap)   │  │ Parser & │  │ Manager  │  │  (ratatui)  │  │
+│  │          │  │Validator │  │          │  │             │  │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └──────┬──────┘  │
+│       │              │             │               │         │
+│       └──────────────┴──────┬──────┴───────────────┘         │
+│                             │                                │
+│                    ┌────────▼────────┐  ┌────────────────┐   │
+│                    │   BPF Loader    │  │  DNS Monitor   │   │
+│                    │   & Maps API    │  │ (FQDN → BPF)  │   │
+│                    └────────┬────────┘  └───────┬────────┘   │
+└─────────────────────────────┼───────────────────┼────────────┘
+                              │  libbpf-rs        │
+                    ┌─────────▼──────────┐        │
+                    │   Pinned BPF Maps  │◄───────┘
+                    │ /sys/fs/bpf/firebee│
+                    └─────────┬──────────┘
+                              │
+         ┌────────────────────┼────────────────────┐
+         │                    │                    │
+┌────────▼──────┐  ┌─────────▼────────┐  ┌────────▼────────┐
+│  XDP Program  │  │   TC Egress      │  │  Ring Buffers   │
+│  (ingress)    │  │   Program        │  │  log_events     │
+│  firebee.bpf.c│  │firebee_egress    │  │  dns_events     │
+│               │  │       .bpf.c     │  │                 │
+└───────────────┘  └──────────────────┘  └─────────────────┘
           Kernel space (eBPF)
 ```
 
@@ -95,7 +96,7 @@ The entry point. Uses [clap](https://docs.rs/clap) to expose these subcommands:
 - **`firebee.bpf.c`** — The XDP program (`xdp_firewall`). Attached to a network interface, it inspects every incoming packet: parses Ethernet/IP/IPv6 headers, extracts protocol and ports, iterates through the rules array map to find a match (with CIDR, protocol, port, and direction checks), logs the decision to a ring buffer, and returns `XDP_DROP` or `XDP_PASS`.
 - **`firebee_egress.bpf.c`** — The TC-BPF program (`tc_egress_firewall`). Attached via the Traffic Control egress hook, it performs the same matching logic on outgoing packets, returning `TC_ACT_SHOT` (drop) or `TC_ACT_OK` (pass).
 - **`firebee_common.h`** — Shared struct definitions (`rule_entry`, `rule_entry_v6`, `rule_metadata`, `log_event`, `rule_stats`) used by both kernel and userspace.
-- **`firebee_helpers.h`** — BPF helper functions for port extraction, rule matching, and IPv6 prefix comparison.
+- **`firebee_helpers.h`** — BPF helper functions for port extraction, rule matching, IPv6 prefix comparison, and DNS response capture.
 - **`firebee_test.bpf.c`** — Kernel-side BPF unit tests using Cilium-style `CHECK`/`TEST` macros.
 
 BPF maps used:
@@ -107,6 +108,7 @@ BPF maps used:
 | `rule_metadata_map` | Hash | Human-readable metadata (name, description) keyed by index |
 | `rule_stats_map` | Array | Per-rule packet/byte counters |
 | `log_events` | Ring Buffer | Real-time packet log events sent to userspace |
+| `dns_events` | Ring Buffer | DNS response payloads captured for FQDN resolution |
 
 #### 3. BPF Userspace Layer (`src/bpf_user/`)
 
@@ -116,14 +118,28 @@ BPF maps used:
 
 #### 4. Policy Engine (`src/policy/`)
 
-- **`parser.rs`** — Reads a `.yaml`/`.yml` or `.json` file, deserialises it into a `PolicyFile` containing a list of `PolicyRule` structs. Supports IPv4, IPv6, CIDR notation, protocol, direction, and port fields.
-- **`validator.rs`** — Validates the parsed policy: checks for non-empty rules, unique names, valid IP addresses, valid actions (`allow`/`pass`/`accept`/`drop`/`deny`/`block`), and valid protocols/directions.
+- **`parser.rs`** — Reads a `.yaml`/`.yml` or `.json` file, deserialises it into a `PolicyFile` containing a list of `PolicyRule` structs. Supports IPv4, IPv6, CIDR notation, protocol, direction, port fields, and FQDN domain rules.
+- **`validator.rs`** — Validates the parsed policy: checks for non-empty rules, unique names, valid IP addresses or domains, valid actions (`allow`/`pass`/`accept`/`drop`/`deny`/`block`), and valid protocols/directions.
 
-#### 5. State Manager (`src/state.rs`)
+#### 5. DNS Monitor (`src/dns/`)
+
+Implements passive DNS sniffing for FQDN-based firewall rules (Cilium-style approach):
+
+- **`parser.rs`** — Parses DNS wire format responses: extracts query names and A/AAAA answer records with IPs and TTLs. Handles DNS label compression pointers.
+- **`cache.rs`** — TTL-aware cache mapping domain names to resolved IP addresses. Tracks per-IP expiry and supports sweep operations to clean up stale entries.
+- **`monitor.rs`** — The orchestrator: polls the `dns_events` BPF ring buffer, parses each captured DNS response, matches against FQDN rules (exact or wildcard), and dynamically installs/removes BPF rules via `RulesState`. Rules are named `fqdn:<domain>:<ip>` for tracking and cleanup.
+
+**How it works:**
+1. BPF programs (XDP + TC) detect UDP packets with source port 53 (DNS responses) and copy the DNS payload into the `dns_events` ring buffer.
+2. The DNS monitor thread polls this ring buffer, parses each DNS response, and checks if the queried domain matches any FQDN rule.
+3. For matching domains, the resolved IP addresses are installed as concrete BPF rules with `/32` masks, inheriting the FQDN rule's action/protocol/direction.
+4. When DNS TTLs expire, the corresponding BPF rules are automatically removed.
+
+#### 6. State Manager (`src/state.rs`)
 
 `RulesState` bridges the policy layer and the BPF maps. It converts `PolicyRule` objects into kernel-level `Rule` structs and calls the maps API to add, get, delete, or list rules.
 
-#### 6. Terminal UI (`src/ui/`)
+#### 7. Terminal UI (`src/ui/`)
 
 Built with [ratatui](https://docs.rs/ratatui) and [crossterm](https://docs.rs/crossterm):
 
