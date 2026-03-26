@@ -85,6 +85,20 @@ struct rule_stats {
     __u64 bytes;     /* Total bytes matched */
 };
 
+/* Maximum DNS packet payload we capture (standard max is 512 for UDP) */
+#define MAX_DNS_PACKET_LEN 512
+
+/*
+ * DNS event structure for ring buffer
+ * Sent to userspace when a DNS response is observed
+ */
+struct dns_event {
+    __u32 src_ip;                       /* DNS server IP (network byte order) */
+    __u16 len;                          /* Actual length of captured DNS data */
+    __u8 _padding[2];                   /* Alignment padding */
+    __u8 data[MAX_DNS_PACKET_LEN];      /* Raw DNS payload (after UDP header) */
+};
+
 /* ========================================================================
  * IPv6 Support Structures
  * ======================================================================== */
@@ -193,6 +207,16 @@ struct {
 	__uint(max_entries, MAX_RULES);
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 } rules_index SEC(".maps");
+
+/*
+ * DNS event ring buffer - Captures DNS response packets for FQDN resolution
+ * Shared between XDP (ingress) and TC (egress) programs
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, 1 << 16); 
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+} dns_events SEC(".maps");
 
 /* ========================================================================
  * IPv6 BPF Maps - Shared between XDP and TC programs

@@ -47,6 +47,15 @@ int xdp_firewall(struct xdp_md *ctx) {
 		
 		extract_ports(iph, data_end, protocol, &src_port, &dst_port);
 
+		/* Capture DNS responses (UDP source port 53) for FQDN resolution */
+		if (protocol == IPPROTO_UDP && src_port == 53) {
+			struct udphdr *udph = (void *)iph + (iph->ihl * 4);
+			if ((void *)(udph + 1) <= data_end) {
+				void *dns_payload = (void *)(udph + 1);
+				capture_dns_response(dns_payload, data_end, iph->saddr);
+			}
+		}
+
 		__u8 action = find_matching_rule(packet_ip, protocol, src_port, dst_port, packet_direction, &matched_rule_idx);
 
 		if (matched_rule_idx != (__u32)-1) {

@@ -180,6 +180,58 @@ static __always_inline void log_packet(__u32 ip, __u8 action) {
 }
 
 /*
+ * Capture DNS response packet and send to userspace via dns_events ring buffer.
+ * Called when we detect a UDP packet with source port 53 (DNS response).
+ *
+ * @iph: pointer to IP header (for extracting DNS server IP)
+ * @udph: pointer to UDP header
+ * @data_end: end of packet data
+ */
+static __always_inline void capture_dns_response(
+	void *udp_payload,
+	void *data_end,
+	__u32 dns_server_ip
+) {
+	__u16 dns_len = (unsigned long)data_end - (unsigned long)udp_payload;
+
+	if (dns_len < 12 || dns_len > MAX_DNS_PACKET_LEN)
+		return;
+
+	__u8 *flags = udp_payload;
+	if ((void *)(flags + 3) > data_end)
+		return;
+	if (!(flags[2] & 0x80))
+		return; 
+
+	struct dns_event *evt = bpf_ringbuf_reserve(&dns_events, sizeof(*evt), 0);
+	if (!evt)
+		return;
+
+	evt->src_ip = dns_server_ip;
+	evt->len = dns_len;
+	__builtin_memset(evt->_padding, 0, sizeof(evt->_padding));
+	__builtin_memset(evt->data, 0, sizeof(evt->data));
+
+	/*
+	 * Copy DNS payload from packet memory into the ring buffer event.
+	 * XDP/TC packet data lives in DMA/linear memory, NOT kernel memory,
+	 * so bpf_probe_read_kernel() does not work here. We use a bounded
+	 * loop with direct pointer access which the BPF verifier can validate.
+	 */
+	#pragma unroll
+	for (int i = 0; i < MAX_DNS_PACKET_LEN; i++) {
+		if (i >= dns_len)
+			break;
+		__u8 *byte = (__u8 *)udp_payload + i;
+		if ((void *)(byte + 1) > data_end)
+			break;
+		evt->data[i] = *byte;
+	}
+
+	bpf_ringbuf_submit(evt, 0);
+}
+
+/*
  * Check if packet matches a specific rule
  * Returns 1 if all conditions match, 0 otherwise
  */
