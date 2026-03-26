@@ -12,7 +12,6 @@ use once_cell::sync::OnceCell;
 use ratatui::prelude::*;
 use std::io;
 use std::path::PathBuf;
-use tokio::sync::mpsc;
 
 mod bpf_user;
 mod models;
@@ -183,8 +182,7 @@ async fn run_firewall(interface: &str, policy: Option<PathBuf>) -> Result<()> {
 }
 
 async fn run_tui() -> Result<()> {
-    let (tx_cmd, _rx_cmd) = mpsc::channel(32);
-    let (tx_log, rx_log) = mpsc::channel(32);
+    let (tx_log, rx_log) = tokio::sync::mpsc::channel(32);
 
     let maps = open_pinned_maps()?;
     let existing_rules = RulesState::list_rules(&maps).unwrap_or_else(|e| {
@@ -242,7 +240,7 @@ async fn run_tui() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(tx_cmd, rx_log, existing_rules);
+    let mut app = App::new(rx_log, existing_rules);
 
     let mut stats_interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
 
