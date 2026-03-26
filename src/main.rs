@@ -14,6 +14,7 @@ use std::io;
 use std::path::PathBuf;
 
 mod bpf_user;
+mod dns;
 mod models;
 mod policy;
 mod state;
@@ -142,6 +143,8 @@ async fn run_firewall(interface: &str, policy: Option<PathBuf>) -> Result<()> {
     let _loader = BpfLoader::new(interface)?;
     println!("✓ XDP program attached to {}", interface);
 
+    let mut fqdn_rules = Vec::new();
+
     if let Some(policy_path) = policy {
         println!(
             "\nLoading rules from policy file: {}",
@@ -155,6 +158,15 @@ async fn run_firewall(interface: &str, policy: Option<PathBuf>) -> Result<()> {
         let maps = open_pinned_maps()?;
 
         for policy_rule in &policy.rules {
+            if policy_rule.is_fqdn_rule() {
+                println!(
+                    "✓ Registered FQDN rule '{}': domain={} (DNS monitor will resolve)",
+                    policy_rule.name,
+                    policy_rule.domain.as_deref().unwrap_or("?")
+                );
+                continue;
+            }
+
             RulesState::add_rule(&maps, policy_rule)?;
 
             let rule = policy_rule.to_rule()?;
@@ -169,7 +181,21 @@ async fn run_firewall(interface: &str, policy: Option<PathBuf>) -> Result<()> {
             );
         }
 
-        println!("\nSuccessfully loaded {} rules!", policy.rules.len());
+        fqdn_rules = dns::monitor::extract_fqdn_rules(&policy.rules);
+        let ip_rule_count = policy.rules.iter().filter(|r| !r.is_fqdn_rule()).count();
+        println!("\nSuccessfully loaded {} rules!", ip_rule_count);
+
+        if !fqdn_rules.is_empty() {
+            println!(
+                "  + {} FQDN rule(s) registered (resolving domains now...)",
+                fqdn_rules.len()
+            );
+            dns::monitor::pre_resolve_fqdn_rules(&fqdn_rules, &maps);
+        }
+    }
+
+    if !fqdn_rules.is_empty() {
+        start_dns_monitor(fqdn_rules);
     }
 
     println!("\nXDP firewall is running. Use 'firebee ui' to view the TUI.");
@@ -177,6 +203,10 @@ async fn run_firewall(interface: &str, policy: Option<PathBuf>) -> Result<()> {
 
     // Keep the loader alive to prevent XDP detachment
     std::mem::forget(_loader);
+
+    // The XDP/TC programs remain attached even after this process exits.
+    tokio::signal::ctrl_c().await.ok();
+    println!("\nExiting. XDP firewall remains attached to the interface.");
 
     Ok(())
 }
@@ -272,6 +302,81 @@ async fn run_tui() -> Result<()> {
     Ok(())
 }
 
+/// Start a background thread that monitors DNS responses from the BPF ring buffer,
+/// matches them against FQDN rules, and installs/removes BPF rules dynamically.
+fn start_dns_monitor(fqdn_rules: Vec<dns::monitor::FqdnRule>) {
+    use crate::dns::monitor::{handle_dns_event, sweep_expired_rules, DnsMonitorState};
+    use libbpf_rs::RingBufferBuilder;
+    use std::sync::{Arc, Mutex};
+
+    let state = Arc::new(Mutex::new(DnsMonitorState::new(fqdn_rules)));
+
+    let dns_state = Arc::clone(&state);
+    std::thread::spawn(move || {
+        let maps = match open_pinned_maps() {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("[dns] Failed to open maps: {}", e);
+                return;
+            }
+        };
+
+        let dns_map = match &maps.dns_events {
+            Some(m) => m,
+            None => {
+                eprintln!("[dns] dns_events map not found — rebuild BPF programs with 'make bpf'");
+                return;
+            }
+        };
+
+        let mut rb_builder = RingBufferBuilder::new();
+        let event_state = Arc::clone(&dns_state);
+        let event_maps = match open_pinned_maps() {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("[dns] Failed to open maps for events: {}", e);
+                return;
+            }
+        };
+
+        // Leak event_maps so it lives for the ring buffer callback's 'static lifetime
+        let event_maps: &'static BpfMaps<'static> = Box::leak(Box::new(event_maps));
+
+        rb_builder
+            .add(dns_map, move |data| {
+                handle_dns_event(data, &event_state, event_maps);
+                0
+            })
+            .expect("Failed to add dns_events to ring buffer");
+
+        let rb = rb_builder.build().expect("Failed to build DNS ring buffer");
+
+        println!("[dns] Monitor started — watching for DNS responses...");
+
+        let mut sweep_counter = 0u32;
+        loop {
+            if let Err(e) = rb.poll(std::time::Duration::from_millis(100)) {
+                log::error!("DNS ring buffer poll error: {}", e);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+
+            // Sweep expired entries every ~10 seconds
+            sweep_counter += 1;
+            if sweep_counter >= 100 {
+                sweep_counter = 0;
+                let sweep_maps = match open_pinned_maps() {
+                    Ok(m) => m,
+                    Err(e) => {
+                        log::error!("DNS monitor: failed to open maps for sweep: {}", e);
+                        continue;
+                    }
+                };
+                sweep_expired_rules(&dns_state, &sweep_maps);
+            }
+        }
+    });
+}
+
 async fn add_rules_from_policy(
     interface: Option<String>,
     policy_path: PathBuf,
@@ -304,6 +409,15 @@ async fn add_rules_from_policy(
     };
 
     for policy_rule in &policy.rules {
+        if policy_rule.is_fqdn_rule() {
+            println!(
+                "✓ Registered FQDN rule '{}': domain={} (DNS monitor will resolve)",
+                policy_rule.name,
+                policy_rule.domain.as_deref().unwrap_or("?")
+            );
+            continue;
+        }
+
         RulesState::add_rule(&maps, policy_rule)?;
 
         let rule = policy_rule.to_rule()?;
@@ -318,13 +432,32 @@ async fn add_rules_from_policy(
         );
     }
 
-    println!("\nSuccessfully added {} rules!", policy.rules.len());
+    let fqdn_rules = dns::monitor::extract_fqdn_rules(&policy.rules);
+    let has_fqdn = !fqdn_rules.is_empty();
+    let ip_rule_count = policy.rules.iter().filter(|r| !r.is_fqdn_rule()).count();
+    println!("\nSuccessfully added {} rules!", ip_rule_count);
+
+    if has_fqdn {
+        println!(
+            "  + {} FQDN rule(s) registered (resolving domains now...)",
+            fqdn_rules.len()
+        );
+        dns::monitor::pre_resolve_fqdn_rules(&fqdn_rules, &maps);
+        start_dns_monitor(fqdn_rules);
+    }
+
     println!("Rules are now active in the eBPF firewall.");
 
     if _loader.is_some() {
         println!("\nXDP program is attached and will remain active.");
         println!("The program will stay loaded even after this command exits.");
         std::mem::forget(_loader); // Intentionally leak to keep XDP attached
+    }
+
+    if has_fqdn {
+        println!("\nDNS monitor is running for FQDN rules.");
+        tokio::signal::ctrl_c().await.ok();
+        println!("\nExiting. FQDN rules installed in BPF maps remain active.");
     }
 
     Ok(())
