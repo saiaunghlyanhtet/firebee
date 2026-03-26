@@ -1,9 +1,15 @@
 use crate::bpf_user::{loader::BpfLoader, maps::BpfMaps};
 use crate::models::rule::Rule;
-use crate::ui::app::Command;
 use libbpf_rs::{Link, RingBufferBuilder};
 use std::net::Ipv4Addr;
 use tokio::sync::mpsc;
+
+#[allow(dead_code)]
+pub enum Command {
+    AddRule(Rule),
+    RemoveRule(Ipv4Addr),
+    Unload,
+}
 
 #[allow(dead_code)]
 pub struct BpfHandler {

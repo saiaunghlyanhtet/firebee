@@ -127,9 +127,9 @@ BPF maps used:
 
 Built with [ratatui](https://docs.rs/ratatui) and [crossterm](https://docs.rs/crossterm):
 
-- **`app.rs`** — Application state: active rules, log buffer, per-rule stats, input mode.
+- **`app.rs`** — Application state: active rules, log buffer, per-rule stats.
 - **`widgets.rs`** — Renders a rules table (name, IP, protocol, direction, ports, action, stats, description), a scrolling log pane, and help text.
-- **`events.rs`** — Keyboard event handling: `Q` to quit, `A` to add a rule interactively, `U` to unload the firewall (with confirmation).
+- **`events.rs`** — Keyboard event handling: `Q` to quit. Rules are managed via the CLI (`firebee add/delete`).
 
 ## Usage
 
