@@ -43,3 +43,8 @@ rules:
     dst_port: 80
     direction: ingress
     description: Block HTTP traffic from specific IP
+
+  - name: block pornhub
+    domain: "*.pornhub.com"
+    action: drop
+    direction: both
