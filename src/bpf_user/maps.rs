@@ -189,6 +189,7 @@ impl RuleMetadata {
             } else {
                 Some(self.dst_port)
             },
+            domain: None,
         }
     }
 }
@@ -296,6 +297,7 @@ impl RuleMetadataV6 {
             } else {
                 Some(self.dst_port)
             },
+            domain: None,
         }
     }
 }
@@ -310,6 +312,8 @@ pub struct BpfMaps<'a> {
     pub metadata_v6: Option<Map<'a>>,
     #[allow(dead_code)]
     pub stats_v6: Option<Map<'a>>,
+    // DNS FQDN support
+    pub dns_events: Option<Map<'a>>,
 }
 
 impl<'a> BpfMaps<'a> {
@@ -321,6 +325,7 @@ impl<'a> BpfMaps<'a> {
         let mut rules_v6_map = None;
         let mut metadata_v6_map = None;
         let mut stats_v6_map = None;
+        let mut dns_events_map = None;
 
         for map in obj.maps() {
             let name = map.name().to_string_lossy();
@@ -332,6 +337,7 @@ impl<'a> BpfMaps<'a> {
                 "rules_v6_map" => rules_v6_map = Some(map),
                 "rule_metadata_v6_map" => metadata_v6_map = Some(map),
                 "rule_stats_v6_map" => stats_v6_map = Some(map),
+                "dns_events" => dns_events_map = Some(map),
                 _ => {}
             }
         }
@@ -349,6 +355,7 @@ impl<'a> BpfMaps<'a> {
             rules_v6: rules_v6_map,
             metadata_v6: metadata_v6_map,
             stats_v6: stats_v6_map,
+            dns_events: dns_events_map,
         }
     }
 
