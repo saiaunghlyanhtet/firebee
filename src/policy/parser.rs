@@ -8,6 +8,7 @@ use std::path::Path;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyRule {
     pub name: String,
+    #[serde(default)]
     pub ip: String,
     pub action: String,
     #[serde(default)]
@@ -20,6 +21,8 @@ pub struct PolicyRule {
     pub src_port: Option<u16>,
     #[serde(default)]
     pub dst_port: Option<u16>,
+    #[serde(default)]
+    pub domain: Option<String>,
 }
 
 fn default_protocol() -> String {
@@ -36,7 +39,30 @@ pub struct PolicyFile {
 }
 
 impl PolicyRule {
+    pub fn is_fqdn_rule(&self) -> bool {
+        self.domain.is_some()
+    }
+
     pub fn to_rule(&self) -> Result<Rule> {
+        if self.is_fqdn_rule() {
+            // FQDN rules don't have a static IP — they're resolved dynamically.
+            // Return a placeholder rule for validation; actual IPs are populated
+            // by the DNS monitor at runtime.
+            let action = self.parse_action()?;
+            let protocol = self.parse_protocol()?;
+            let direction = self.parse_direction()?;
+
+            return Ok(Rule {
+                ip: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                subnet_mask: Some(0),
+                action,
+                protocol,
+                direction,
+                src_port: self.src_port,
+                dst_port: self.dst_port,
+            });
+        }
+
         let (ip, subnet_mask) = if self.ip.contains('/') {
             let parts: Vec<&str> = self.ip.split('/').collect();
             if parts.len() != 2 {
@@ -82,38 +108,9 @@ impl PolicyRule {
             anyhow::bail!("Invalid IP address '{}' in rule '{}'", self.ip, self.name)
         };
 
-        let action = match self.action.to_lowercase().as_str() {
-            "allow" | "pass" | "accept" => Action::Allow,
-            "drop" | "deny" | "block" => Action::Drop,
-            _ => anyhow::bail!(
-                "Invalid action '{}' in rule '{}'. Must be 'allow' or 'drop'",
-                self.action,
-                self.name
-            ),
-        };
-
-        let protocol = match self.protocol.to_lowercase().as_str() {
-            "tcp" => Protocol::TCP,
-            "udp" => Protocol::UDP,
-            "icmp" => Protocol::ICMP,
-            "any" | "" => Protocol::Any,
-            _ => anyhow::bail!(
-                "Invalid protocol '{}' in rule '{}'. Must be tcp, udp, icmp, or any",
-                self.protocol,
-                self.name
-            ),
-        };
-
-        let direction = match self.direction.to_lowercase().as_str() {
-            "ingress" | "in" | "input" => Direction::Ingress,
-            "egress" | "out" | "output" => Direction::Egress,
-            "both" | "any" => Direction::Both,
-            _ => anyhow::bail!(
-                "Invalid direction '{}' in rule '{}'. Must be ingress, egress, or both",
-                self.direction,
-                self.name
-            ),
-        };
+        let action = self.parse_action()?;
+        let protocol = self.parse_protocol()?;
+        let direction = self.parse_direction()?;
 
         Ok(Rule {
             ip,
@@ -124,6 +121,45 @@ impl PolicyRule {
             src_port: self.src_port,
             dst_port: self.dst_port,
         })
+    }
+
+    fn parse_action(&self) -> Result<Action> {
+        match self.action.to_lowercase().as_str() {
+            "allow" | "pass" | "accept" => Ok(Action::Allow),
+            "drop" | "deny" | "block" => Ok(Action::Drop),
+            _ => anyhow::bail!(
+                "Invalid action '{}' in rule '{}'. Must be 'allow' or 'drop'",
+                self.action,
+                self.name
+            ),
+        }
+    }
+
+    fn parse_protocol(&self) -> Result<Protocol> {
+        match self.protocol.to_lowercase().as_str() {
+            "tcp" => Ok(Protocol::TCP),
+            "udp" => Ok(Protocol::UDP),
+            "icmp" => Ok(Protocol::ICMP),
+            "any" | "" => Ok(Protocol::Any),
+            _ => anyhow::bail!(
+                "Invalid protocol '{}' in rule '{}'. Must be tcp, udp, icmp, or any",
+                self.protocol,
+                self.name
+            ),
+        }
+    }
+
+    fn parse_direction(&self) -> Result<Direction> {
+        match self.direction.to_lowercase().as_str() {
+            "ingress" | "in" | "input" => Ok(Direction::Ingress),
+            "egress" | "out" | "output" => Ok(Direction::Egress),
+            "both" | "any" => Ok(Direction::Both),
+            _ => anyhow::bail!(
+                "Invalid direction '{}' in rule '{}'. Must be ingress, egress, or both",
+                self.direction,
+                self.name
+            ),
+        }
     }
 }
 
@@ -158,6 +194,7 @@ mod tests {
             src_port: None,
             dst_port: None,
             direction: "ingress".to_string(),
+            domain: None,
         }
     }
 
@@ -377,6 +414,7 @@ mod tests {
             src_port: Some(443),
             dst_port: Some(80),
             direction: "ingress".to_string(),
+            domain: None,
         };
 
         let result = rule.to_rule();

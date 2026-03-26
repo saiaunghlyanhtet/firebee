@@ -21,17 +21,39 @@ pub fn validate_policy(policy: &PolicyFile) -> Result<()> {
             anyhow::bail!("{}: duplicate rule name '{}'", rule_pos, rule.name);
         }
 
-        let _ = rule
-            .to_rule()
-            .with_context(|| format!("{}: validation failed", rule_pos))?;
+        // Validate that either ip or domain is set, not both
+        let has_ip = !rule.ip.is_empty();
+        let has_domain = rule.domain.is_some();
 
-        if let Some(prev_idx) = seen_ips.insert(rule.ip.clone(), idx) {
-            log::warn!(
-                "Warning: IP {} appears in multiple rules: '{}' and '{}'",
-                rule.ip,
-                policy.rules[prev_idx].name,
-                rule.name
-            );
+        if !has_ip && !has_domain {
+            anyhow::bail!("{}: must specify either 'ip' or 'domain'", rule_pos);
+        }
+
+        if has_ip && has_domain {
+            anyhow::bail!("{}: cannot specify both 'ip' and 'domain'", rule_pos);
+        }
+
+        if let Some(domain) = &rule.domain {
+            if domain.is_empty() {
+                anyhow::bail!("{}: domain cannot be empty", rule_pos);
+            }
+            // Validate action/protocol/direction via to_rule() which handles FQDN rules
+            let _ = rule
+                .to_rule()
+                .with_context(|| format!("{}: validation failed", rule_pos))?;
+        } else {
+            let _ = rule
+                .to_rule()
+                .with_context(|| format!("{}: validation failed", rule_pos))?;
+
+            if let Some(prev_idx) = seen_ips.insert(rule.ip.clone(), idx) {
+                log::warn!(
+                    "Warning: IP {} appears in multiple rules: '{}' and '{}'",
+                    rule.ip,
+                    policy.rules[prev_idx].name,
+                    rule.name
+                );
+            }
         }
 
         let action_lower = rule.action.to_lowercase();
@@ -71,6 +93,7 @@ mod tests {
                     src_port: None,
                     dst_port: None,
                     direction: "ingress".to_string(),
+                    domain: None,
                 },
                 PolicyRule {
                     name: "rule1".to_string(),
@@ -81,6 +104,7 @@ mod tests {
                     src_port: None,
                     dst_port: None,
                     direction: "ingress".to_string(),
+                    domain: None,
                 },
             ],
         };
@@ -99,6 +123,7 @@ mod tests {
                 src_port: None,
                 dst_port: None,
                 direction: "ingress".to_string(),
+                domain: None,
             }],
         };
         assert!(validate_policy(&policy).is_err());
@@ -117,6 +142,7 @@ mod tests {
                     src_port: None,
                     dst_port: None,
                     direction: "ingress".to_string(),
+                    domain: None,
                 },
                 PolicyRule {
                     name: "rule2".to_string(),
@@ -127,6 +153,7 @@ mod tests {
                     src_port: None,
                     dst_port: Some(80),
                     direction: "ingress".to_string(),
+                    domain: None,
                 },
             ],
         };
@@ -145,6 +172,7 @@ mod tests {
                 src_port: None,
                 dst_port: None,
                 direction: "ingress".to_string(),
+                domain: None,
             }],
         };
         let result = validate_policy(&policy);
@@ -167,6 +195,7 @@ mod tests {
                 src_port: None,
                 dst_port: None,
                 direction: "ingress".to_string(),
+                domain: None,
             }],
         };
         let result = validate_policy(&policy);
@@ -194,6 +223,7 @@ mod tests {
                     src_port: None,
                     dst_port: None,
                     direction: "ingress".to_string(),
+                    domain: None,
                 }],
             };
             assert!(
@@ -217,6 +247,7 @@ mod tests {
                     src_port: None,
                     dst_port: Some(80),
                     direction: "ingress".to_string(),
+                    domain: None,
                 },
                 PolicyRule {
                     name: "rule2".to_string(),
@@ -227,6 +258,7 @@ mod tests {
                     src_port: None,
                     dst_port: Some(53),
                     direction: "egress".to_string(),
+                    domain: None,
                 },
                 PolicyRule {
                     name: "rule3".to_string(),
@@ -237,6 +269,7 @@ mod tests {
                     src_port: None,
                     dst_port: None,
                     direction: "both".to_string(),
+                    domain: None,
                 },
             ],
         };
@@ -263,6 +296,7 @@ mod tests {
                     src_port,
                     dst_port,
                     direction: "ingress".to_string(),
+                    domain: None,
                 }],
             };
             assert!(validate_policy(&policy).is_ok());
@@ -284,6 +318,7 @@ mod tests {
                     src_port: None,
                     dst_port: None,
                     direction: direction.to_string(),
+                    domain: None,
                 }],
             };
             assert!(validate_policy(&policy).is_ok());
@@ -311,6 +346,7 @@ mod tests {
                     src_port: None,
                     dst_port: None,
                     direction: "ingress".to_string(),
+                    domain: None,
                 }],
             };
             assert!(
@@ -336,6 +372,7 @@ mod tests {
                     src_port: None,
                     dst_port: None,
                     direction: "ingress".to_string(),
+                    domain: None,
                 }],
             };
             assert!(validate_policy(&policy).is_ok());
