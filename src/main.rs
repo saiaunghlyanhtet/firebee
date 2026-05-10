@@ -15,6 +15,7 @@ use std::path::PathBuf;
 
 mod bpf_user;
 mod dns;
+mod metrics;
 mod models;
 mod policy;
 mod state;
@@ -68,6 +69,11 @@ enum Commands {
     Stats {
         #[command(subcommand)]
         command: StatsCommands,
+    },
+    /// Start a Prometheus metrics HTTP server
+    Metrics {
+        #[arg(short, long, default_value = "2112")]
+        port: u16,
     },
 }
 
@@ -133,6 +139,9 @@ async fn main() -> Result<()> {
                 reset_stats()?;
             }
         },
+        Commands::Metrics { port } => {
+            run_metrics_server(port).await?;
+        }
     }
 
     Ok(())
@@ -590,7 +599,7 @@ fn show_stats(format: OutputFormat) -> Result<()> {
         })
         .collect();
 
-    stats_list.sort_by(|a, b| b.packets.cmp(&a.packets));
+    stats_list.sort_by_key(|b| std::cmp::Reverse(b.packets));
 
     let output = match format {
         OutputFormat::Yaml => {
@@ -623,6 +632,54 @@ fn reset_stats() -> Result<()> {
     println!("✓ All statistics have been reset");
 
     Ok(())
+}
+
+async fn run_metrics_server(port: u16) -> Result<()> {
+    use axum::{routing::get, Router};
+    use std::net::SocketAddr;
+
+    let app = Router::new().route("/metrics", get(serve_metrics));
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    println!(
+        "Prometheus metrics available at http://0.0.0.0:{}/metrics",
+        port
+    );
+    println!("Press Ctrl-C to stop.");
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("Failed to bind to port {}", port))?;
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+async fn serve_metrics() -> axum::response::Response {
+    use axum::{
+        http::{header, StatusCode},
+        response::IntoResponse,
+    };
+
+    const CT: &str = "text/plain; version=0.0.4; charset=utf-8";
+
+    match open_pinned_maps() {
+        Ok(maps) => {
+            let body = metrics::format_prometheus(&maps);
+            (StatusCode::OK, [(header::CONTENT_TYPE, CT)], body).into_response()
+        }
+        Err(e) => {
+            let body = format!(
+                "# HELP firebee_up 1 if BPF maps are reachable, 0 otherwise\n\
+                 # TYPE firebee_up gauge\n\
+                 firebee_up 0\n\
+                 # Error: {e}\n"
+            );
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::CONTENT_TYPE, CT)],
+                body,
+            )
+                .into_response()
+        }
+    }
 }
 
 fn format_bytes_human(bytes: u64) -> String {
