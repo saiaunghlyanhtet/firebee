@@ -302,6 +302,39 @@ impl RuleMetadataV6 {
     }
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ConntrackKey {
+    pub src_ip: u32,
+    pub dst_ip: u32,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub proto: u8,
+    pub _pad: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ConntrackEntry {
+    pub state: u8,
+    pub _pad: [u8; 3],
+    pub timeout_sec: u32,
+    pub last_seen: u64,
+}
+
+impl ConntrackEntry {
+    pub fn state_name(&self) -> &'static str {
+        match self.state {
+            0 => "NEW",
+            1 => "SYN_SENT",
+            2 => "ESTABLISHED",
+            3 => "FIN_WAIT",
+            4 => "CLOSED",
+            _ => "UNKNOWN",
+        }
+    }
+}
+
 pub struct BpfMaps<'a> {
     pub rules: Map<'a>,
     pub log_events: Map<'a>,
@@ -314,6 +347,8 @@ pub struct BpfMaps<'a> {
     pub stats_v6: Option<Map<'a>>,
     // DNS FQDN support
     pub dns_events: Option<Map<'a>>,
+    // Connection tracking
+    pub conntrack: Option<Map<'a>>,
 }
 
 impl<'a> BpfMaps<'a> {
@@ -326,6 +361,7 @@ impl<'a> BpfMaps<'a> {
         let mut metadata_v6_map = None;
         let mut stats_v6_map = None;
         let mut dns_events_map = None;
+        let mut conntrack_map = None;
 
         for map in obj.maps() {
             let name = map.name().to_string_lossy();
@@ -338,6 +374,7 @@ impl<'a> BpfMaps<'a> {
                 "rule_metadata_v6_map" => metadata_v6_map = Some(map),
                 "rule_stats_v6_map" => stats_v6_map = Some(map),
                 "dns_events" => dns_events_map = Some(map),
+                "conntrack_map" => conntrack_map = Some(map),
                 _ => {}
             }
         }
@@ -356,7 +393,34 @@ impl<'a> BpfMaps<'a> {
             metadata_v6: metadata_v6_map,
             stats_v6: stats_v6_map,
             dns_events: dns_events_map,
+            conntrack: conntrack_map,
         }
+    }
+
+    /// Iterate all live connections from the conntrack LRU hash map.
+    pub fn list_connections(
+        &self,
+    ) -> Result<Vec<(ConntrackKey, ConntrackEntry)>, libbpf_rs::Error> {
+        let ct_map = match &self.conntrack {
+            Some(m) => m,
+            None => return Ok(Vec::new()),
+        };
+
+        let mut conns = Vec::new();
+        for key_bytes in ct_map.keys() {
+            if key_bytes.len() < std::mem::size_of::<ConntrackKey>() {
+                continue;
+            }
+            let key = unsafe { std::ptr::read(key_bytes.as_ptr() as *const ConntrackKey) };
+
+            if let Some(val) = ct_map.lookup(&key_bytes, libbpf_rs::MapFlags::ANY)? {
+                if val.len() >= std::mem::size_of::<ConntrackEntry>() {
+                    let entry = unsafe { std::ptr::read(val.as_ptr() as *const ConntrackEntry) };
+                    conns.push((key, entry));
+                }
+            }
+        }
+        Ok(conns)
     }
 
     pub fn update_rule(&self, rule: &Rule, action: u8) -> Result<(), libbpf_rs::Error> {
