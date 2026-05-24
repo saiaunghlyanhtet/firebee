@@ -39,6 +39,12 @@ enum OutputFormat {
     Json,
 }
 
+#[derive(Clone, ValueEnum)]
+enum ConnsFormat {
+    Table,
+    Json,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     Run {
@@ -69,6 +75,10 @@ enum Commands {
     Stats {
         #[command(subcommand)]
         command: StatsCommands,
+    },
+    Conns {
+        #[arg(short, long, value_enum, default_value = "table")]
+        output: ConnsFormat,
     },
     /// Start a Prometheus metrics HTTP server
     Metrics {
@@ -139,6 +149,9 @@ async fn main() -> Result<()> {
                 reset_stats()?;
             }
         },
+        Commands::Conns { output } => {
+            show_conns(output)?;
+        }
         Commands::Metrics { port } => {
             run_metrics_server(port).await?;
         }
@@ -680,6 +693,91 @@ async fn serve_metrics() -> axum::response::Response {
                 .into_response()
         }
     }
+}
+
+fn show_conns(format: ConnsFormat) -> Result<()> {
+    use serde::{Deserialize, Serialize};
+    use std::net::Ipv4Addr;
+
+    #[derive(Serialize, Deserialize)]
+    struct ConnRow {
+        proto: String,
+        src: String,
+        dst: String,
+        state: String,
+        age_secs: u64,
+    }
+
+    let maps = open_pinned_maps()?;
+    let conns = maps
+        .list_connections()
+        .context("Failed to read conntrack map")?;
+
+    if conns.is_empty() {
+        println!("No active tracked connections.");
+        return Ok(());
+    }
+
+    // bpf_ktime_get_ns() is nanoseconds since boot; we use the delta from
+    // last_seen to now approximated via /proc/uptime.
+    let boot_ns: u64 = {
+        let uptime_s = std::fs::read_to_string("/proc/uptime")
+            .ok()
+            .and_then(|s| s.split_whitespace().next()?.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        (uptime_s * 1_000_000_000.0) as u64
+    };
+
+    let mut rows: Vec<ConnRow> = conns
+        .iter()
+        .filter(|(_, e)| e.state != 4 /* CT_CLOSED */)
+        .map(|(key, entry)| {
+            let proto = match key.proto {
+                6 => "TCP",
+                17 => "UDP",
+                _ => "?",
+            };
+            let src_ip = Ipv4Addr::from(key.src_ip);
+            let dst_ip = Ipv4Addr::from(key.dst_ip);
+            let age_ns = boot_ns.saturating_sub(entry.last_seen);
+            let age_secs = age_ns / 1_000_000_000;
+            ConnRow {
+                proto: proto.to_string(),
+                src: format!("{}:{}", src_ip, key.src_port),
+                dst: format!("{}:{}", dst_ip, key.dst_port),
+                state: entry.state_name().to_string(),
+                age_secs,
+            }
+        })
+        .collect();
+
+    rows.sort_by_key(|r| r.age_secs);
+
+    match format {
+        ConnsFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&rows)
+                    .context("Failed to serialize connections to JSON")?
+            );
+        }
+        ConnsFormat::Table => {
+            println!(
+                "{:<6} {:<25} {:<25} {:<14} AGE",
+                "PROTO", "SRC", "DST", "STATE"
+            );
+            println!("{}", "-".repeat(80));
+            for r in &rows {
+                println!(
+                    "{:<6} {:<25} {:<25} {:<14} {}s",
+                    r.proto, r.src, r.dst, r.state, r.age_secs
+                );
+            }
+            println!("\nTotal: {} connection(s)", rows.len());
+        }
+    }
+
+    Ok(())
 }
 
 fn format_bytes_human(bytes: u64) -> String {
