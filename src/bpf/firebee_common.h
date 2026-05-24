@@ -135,6 +135,54 @@ struct rule_metadata_v6 {
     char description[128];
 };
 
+/* Connection states */
+#define CT_NEW         0
+#define CT_SYN_SENT    1
+#define CT_ESTABLISHED 2
+#define CT_FIN_WAIT    3
+#define CT_CLOSED      4
+
+/* Timeouts in seconds */
+#define CT_TIMEOUT_SYN         30
+#define CT_TIMEOUT_ESTABLISHED 300
+#define CT_TIMEOUT_FIN         30
+
+/* Max tracked connections; LRU eviction handles overflow */
+#define CT_MAX_ENTRIES 65536
+
+/*
+ * 5-tuple key, always stored from the initiating packet's perspective.
+ * IPs and ports are in host byte order (after bpf_ntohl / bpf_ntohs).
+ */
+struct conntrack_key {
+    __u32 src_ip;
+    __u32 dst_ip;
+    __u16 src_port;
+    __u16 dst_port;
+    __u8  proto;
+    __u8  _pad[3];
+};
+
+struct conntrack_entry {
+    __u8  state;
+    __u8  _pad[3];
+    __u32 timeout_sec;
+    __u64 last_seen;   /* bpf_ktime_get_ns() */
+};
+
+/*
+ * Connection tracking table shared by XDP (ingress) and TC (egress).
+ * XDP checks the reverse key to fast-path return traffic for egress-initiated
+ * connections; TC checks the forward key for ongoing egress connections.
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __type(key, struct conntrack_key);
+    __type(value, struct conntrack_entry);
+    __uint(max_entries, CT_MAX_ENTRIES);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} conntrack_map SEC(".maps");
+
 /* ========================================================================
  * Shared BPF Maps - Defined once and pinned for use across programs
  * These maps are shared between XDP and TC-BPF programs via pinning

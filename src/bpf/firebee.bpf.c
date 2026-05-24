@@ -40,11 +40,12 @@ int xdp_firewall(struct xdp_md *ctx) {
 		}
 
 		__u32 packet_ip = bpf_ntohl(iph->saddr);
+		__u32 local_ip  = bpf_ntohl(iph->daddr);
 		__u8 protocol = iph->protocol;
 		__u16 src_port, dst_port;
 		__u32 matched_rule_idx;
 		__u8 packet_direction = DIRECTION_INGRESS;
-		
+
 		extract_ports(iph, data_end, protocol, &src_port, &dst_port);
 
 		/* Capture DNS responses (UDP source port 53) for FQDN resolution */
@@ -53,6 +54,57 @@ int xdp_firewall(struct xdp_md *ctx) {
 			if ((void *)(udph + 1) <= data_end) {
 				void *dns_payload = (void *)(udph + 1);
 				capture_dns_response(dns_payload, data_end, iph->saddr);
+			}
+		}
+
+		/* ---------------------------------------------------------------
+		 * Conntrack fast path: allow return traffic for tracked connections
+		 * without evaluating the full rule list.
+		 *
+		 * Reverse lookup: finds entries created by the egress path
+		 * (key stored as local→remote; ingress packet is remote→local).
+		 * Forward lookup: finds entries created when we accepted an inbound
+		 * connection (key stored as remote→local; subsequent packets match).
+		 * --------------------------------------------------------------- */
+		if (protocol == IPPROTO_TCP || protocol == IPPROTO_UDP) {
+			struct conntrack_entry *ct;
+
+			ct = ct_lookup(local_ip, packet_ip, dst_port, src_port, protocol);
+			if (!ct)
+				ct = ct_lookup(packet_ip, local_ip, src_port, dst_port, protocol);
+
+			if (ct) {
+				__u64 now = bpf_ktime_get_ns();
+				__u64 timeout_ns = (__u64)ct->timeout_sec * 1000000000ULL;
+
+				if (now - ct->last_seen < timeout_ns) {
+					if (protocol == IPPROTO_TCP) {
+						struct tcphdr *tcph = (void *)iph + (iph->ihl * 4);
+						if ((void *)(tcph + 1) <= data_end) {
+							if (tcph->rst) {
+								ct->state = CT_CLOSED;
+							} else if (tcph->fin) {
+								ct->state       = CT_FIN_WAIT;
+								ct->timeout_sec = CT_TIMEOUT_FIN;
+								ct->last_seen   = now;
+							} else if (tcph->syn && tcph->ack &&
+								   ct->state == CT_SYN_SENT) {
+								ct->state       = CT_ESTABLISHED;
+								ct->timeout_sec = CT_TIMEOUT_ESTABLISHED;
+								ct->last_seen   = now;
+							} else if (ct->state != CT_CLOSED) {
+								ct->last_seen = now;
+							}
+						}
+					} else {
+						ct->last_seen = now;
+					}
+
+					if (ct->state != CT_CLOSED) {
+						log_packet(packet_ip, ACTION_ALLOW);
+						return XDP_PASS;
+					}
+				}
 			}
 		}
 
@@ -65,6 +117,24 @@ int xdp_firewall(struct xdp_md *ctx) {
 				__sync_fetch_and_add(&stats->packets, 1);
 				__sync_fetch_and_add(&stats->bytes, packet_size);
 			}
+		}
+
+		/* Track newly allowed TCP/UDP connections so return traffic is
+		 * fast-pathed by the conntrack check above. */
+		if (action == ACTION_ALLOW &&
+		    (protocol == IPPROTO_TCP || protocol == IPPROTO_UDP)) {
+			__u8  ct_state   = CT_ESTABLISHED;
+			__u32 ct_timeout = CT_TIMEOUT_ESTABLISHED;
+			if (protocol == IPPROTO_TCP) {
+				struct tcphdr *tcph = (void *)iph + (iph->ihl * 4);
+				if ((void *)(tcph + 1) <= data_end &&
+				    tcph->syn && !tcph->ack) {
+					ct_state   = CT_SYN_SENT;
+					ct_timeout = CT_TIMEOUT_SYN;
+				}
+			}
+			ct_upsert(packet_ip, local_ip, src_port, dst_port,
+				  protocol, ct_state, ct_timeout);
 		}
 
 		log_packet(packet_ip, action);
