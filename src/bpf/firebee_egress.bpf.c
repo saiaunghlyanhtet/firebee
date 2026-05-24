@@ -40,19 +40,63 @@ int tc_egress_firewall(struct __sk_buff *skb) {
 			return TC_ACT_OK;
 		}
 
-		__u32 packet_ip = bpf_ntohl(iph->daddr);
+		__u32 src_ip    = bpf_ntohl(iph->saddr); /* local IP */
+		__u32 packet_ip = bpf_ntohl(iph->daddr); /* remote IP, used for rule matching */
 		__u8 protocol = iph->protocol;
 		__u16 src_port, dst_port;
 		__u32 matched_rule_idx;
 		__u8 packet_direction = DIRECTION_EGRESS;
-		
-		bpf_printk("TC egress: packet to %pI4, proto %d", &iph->daddr, protocol);
-		
+
 		extract_ports(iph, data_end, protocol, &src_port, &dst_port);
 
-		__u8 action = find_matching_rule(packet_ip, protocol, src_port, dst_port, packet_direction, &matched_rule_idx);
+		/* ---------------------------------------------------------------
+		 * Conntrack fast path: skip rule evaluation for packets that
+		 * belong to an already-established connection.
+		 *
+		 * Forward lookup: matches entries we created for prior egress
+		 * packets (local→remote).
+		 * Reverse lookup: matches entries created by XDP when we accepted
+		 * an inbound connection (remote→local stored by XDP); our reply
+		 * is the reverse direction.
+		 * --------------------------------------------------------------- */
+		if (protocol == IPPROTO_TCP || protocol == IPPROTO_UDP) {
+			struct conntrack_entry *ct;
 
-		bpf_printk("TC egress: matched rule idx %d, action %d", matched_rule_idx, action);
+			ct = ct_lookup(src_ip, packet_ip, src_port, dst_port, protocol);
+			if (!ct)
+				ct = ct_lookup(packet_ip, src_ip, dst_port, src_port, protocol);
+
+			if (ct) {
+				__u64 now = bpf_ktime_get_ns();
+				__u64 timeout_ns = (__u64)ct->timeout_sec * 1000000000ULL;
+
+				if (now - ct->last_seen < timeout_ns) {
+					if (protocol == IPPROTO_TCP) {
+						struct tcphdr *tcph = (void *)iph + (iph->ihl * 4);
+						if ((void *)(tcph + 1) <= data_end) {
+							if (tcph->rst) {
+								ct->state = CT_CLOSED;
+							} else if (tcph->fin) {
+								ct->state       = CT_FIN_WAIT;
+								ct->timeout_sec = CT_TIMEOUT_FIN;
+								ct->last_seen   = now;
+							} else if (ct->state != CT_CLOSED) {
+								ct->last_seen = now;
+							}
+						}
+					} else {
+						ct->last_seen = now;
+					}
+
+					if (ct->state != CT_CLOSED) {
+						log_packet(packet_ip, ACTION_ALLOW);
+						return TC_ACT_OK;
+					}
+				}
+			}
+		}
+
+		__u8 action = find_matching_rule(packet_ip, protocol, src_port, dst_port, packet_direction, &matched_rule_idx);
 
 		if (matched_rule_idx != (__u32)-1) {
 			struct rule_stats *stats = bpf_map_lookup_elem(&rule_stats_map, &matched_rule_idx);
@@ -63,12 +107,28 @@ int tc_egress_firewall(struct __sk_buff *skb) {
 			}
 		}
 
+		/* Track newly allowed egress connections so the XDP ingress path
+		 * can fast-path the return traffic via a reverse key lookup. */
+		if (action == ACTION_ALLOW &&
+		    (protocol == IPPROTO_TCP || protocol == IPPROTO_UDP)) {
+			__u8  ct_state   = CT_ESTABLISHED;
+			__u32 ct_timeout = CT_TIMEOUT_ESTABLISHED;
+			if (protocol == IPPROTO_TCP) {
+				struct tcphdr *tcph = (void *)iph + (iph->ihl * 4);
+				if ((void *)(tcph + 1) <= data_end &&
+				    tcph->syn && !tcph->ack) {
+					ct_state   = CT_SYN_SENT;
+					ct_timeout = CT_TIMEOUT_SYN;
+				}
+			}
+			ct_upsert(src_ip, packet_ip, src_port, dst_port,
+				  protocol, ct_state, ct_timeout);
+		}
+
 		log_packet(packet_ip, action);
 
-		if (action == ACTION_DROP) {
-			bpf_printk("TC egress: DROPPING packet");
+		if (action == ACTION_DROP)
 			return TC_ACT_SHOT;
-		}
 		return TC_ACT_OK;
 	}
 	else if (eth_proto == ETH_P_IPV6) {

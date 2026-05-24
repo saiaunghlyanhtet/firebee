@@ -232,6 +232,44 @@ static __always_inline void capture_dns_response(
 }
 
 /*
+ * Look up a connection entry by 5-tuple.
+ * All fields are in host byte order.
+ * Returns a pointer to the live map value (safe to write through), or NULL.
+ */
+static __always_inline struct conntrack_entry *ct_lookup(
+    __u32 src_ip, __u32 dst_ip, __u16 src_port, __u16 dst_port, __u8 proto
+) {
+    struct conntrack_key key = {};
+    key.src_ip   = src_ip;
+    key.dst_ip   = dst_ip;
+    key.src_port = src_port;
+    key.dst_port = dst_port;
+    key.proto    = proto;
+    return bpf_map_lookup_elem(&conntrack_map, &key);
+}
+
+/*
+ * Create or refresh a connection tracking entry.
+ */
+static __always_inline void ct_upsert(
+    __u32 src_ip, __u32 dst_ip, __u16 src_port, __u16 dst_port, __u8 proto,
+    __u8 state, __u32 timeout_sec
+) {
+    struct conntrack_key key = {};
+    key.src_ip   = src_ip;
+    key.dst_ip   = dst_ip;
+    key.src_port = src_port;
+    key.dst_port = dst_port;
+    key.proto    = proto;
+
+    struct conntrack_entry entry = {};
+    entry.state       = state;
+    entry.timeout_sec = timeout_sec;
+    entry.last_seen   = bpf_ktime_get_ns();
+    bpf_map_update_elem(&conntrack_map, &key, &entry, BPF_ANY);
+}
+
+/*
  * Check if packet matches a specific rule
  * Returns 1 if all conditions match, 0 otherwise
  */
